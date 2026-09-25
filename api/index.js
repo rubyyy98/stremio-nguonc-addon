@@ -14,7 +14,7 @@ app.use((req, res, next) => {
 
 const MANIFEST = {
   id: 'org.nguonc.stremio.addon',
-  version: '1.0.0',
+  version: '1.0.1',
   name: 'Phim Vietsub HD',
   description: 'Addon xem phim Vietsub tốc độ cao cho Stremio',
   resources: ['catalog', 'meta', 'stream'],
@@ -24,19 +24,25 @@ const MANIFEST = {
       type: 'movie',
       id: 'nguonc_catalog_movie',
       name: 'Phim Lẻ Vietsub',
-      extra: [{ name: 'search', isRequired: false }]
+      extra: [
+        { name: 'search', isRequired: false },
+        { name: 'skip', isRequired: false }
+      ]
     },
     {
       type: 'series',
       id: 'nguonc_catalog_series',
       name: 'Phim Bộ Vietsub',
-      extra: [{ name: 'search', isRequired: false }]
+      extra: [
+        { name: 'search', isRequired: false },
+        { name: 'skip', isRequired: false }
+      ]
     }
   ]
 };
 
-// Fetch với timeout ngắn (2.5 giây)
-async function fetchWithTimeout(url, timeoutMs = 2500) {
+// Fetch với timeout ngắn (3 giây)
+async function fetchWithTimeout(url, timeoutMs = 3000) {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -58,7 +64,7 @@ async function fetchWithTimeout(url, timeoutMs = 2500) {
 // 1. Manifest
 app.get('/manifest.json', (req, res) => res.json(MANIFEST));
 
-// 2. Catalog
+// 2. Catalog (Tính toán trang dựa trên skip)
 app.get('/catalog/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
   const fullUrl = req.originalUrl || req.url;
@@ -71,23 +77,35 @@ app.get('/catalog/:type/:id*', async (req, res) => {
     if (match) search = decodeURIComponent(match[1]);
   }
 
+  // Lấy thông số skip để tính trang (Mỗi trang API trả về khoảng 24 phim)
+  let skip = 0;
+  if (req.query.skip) {
+    skip = parseInt(req.query.skip) || 0;
+  } else if (fullUrl.includes('skip=')) {
+    const match = fullUrl.match(/skip=(\d+)/);
+    if (match) skip = parseInt(match[1]) || 0;
+  }
+
+  // Tính số trang API tương ứng (Page = skip / 24 + 1)
+  const page = Math.floor(skip / 24) + 1;
+
   let kkUrl = '';
   let nguoncUrl = '';
 
   if (search) {
-    kkUrl = `https://phimapi.com/v1/api/tim-kiem?keyword=${encodeURIComponent(search)}`;
-    nguoncUrl = `https://phim.nguonc.com/api/films/search?keyword=${encodeURIComponent(search)}`;
+    kkUrl = `https://phimapi.com/v1/api/tim-kiem?keyword=${encodeURIComponent(search)}&page=${page}`;
+    nguoncUrl = `https://phim.nguonc.com/api/films/search?keyword=${encodeURIComponent(search)}&page=${page}`;
   } else {
     const isSeries = id.includes('series') || type === 'series';
     kkUrl = isSeries 
-      ? 'https://phimapi.com/v1/api/danh-sach/phim-bo?page=1' 
-      : 'https://phimapi.com/v1/api/danh-sach/phim-le?page=1';
+      ? `https://phimapi.com/v1/api/danh-sach/phim-bo?page=${page}` 
+      : `https://phimapi.com/v1/api/danh-sach/phim-le?page=${page}`;
     nguoncUrl = isSeries 
-      ? 'https://phim.nguonc.com/api/films/danh-sach/phim-bo?page=1' 
-      : 'https://phim.nguonc.com/api/films/danh-sach/phim-le?page=1';
+      ? `https://phim.nguonc.com/api/films/danh-sach/phim-bo?page=${page}` 
+      : `https://phim.nguonc.com/api/films/danh-sach/phim-le?page=${page}`;
   }
 
-  // Gọi song song cả 2 API, nguồn nào trả về trước lấy nguồn đó
+  // Gọi song song API
   const dataKK = await fetchWithTimeout(kkUrl);
   let items = dataKK?.data?.items || [];
 
