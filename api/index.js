@@ -35,34 +35,44 @@ const MANIFEST = {
   ]
 };
 
-async function fetchNguonc(url) {
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000);
+// Hàm fetch tự động bypass 403 qua Proxy
+async function fetchNguonc(targetUrl) {
+  // Danh sách các proxy dự phòng để lách Cloudflare 403
+  const proxies = [
+    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    (url) => url // Gọi trực tiếp nếu proxy thất bại
+  ];
 
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7'
-      },
-      signal: controller.signal
-    });
+  for (const getProxyUrl of proxies) {
+    try {
+      const fetchUrl = getProxyUrl(targetUrl);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 7000);
 
-    clearTimeout(timeoutId);
+      const response = await fetch(fetchUrl, {
+        method: 'GET',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+        },
+        signal: controller.signal
+      });
 
-    if (!response.ok) {
-      console.error(`HTTP error! status: ${response.status} for url: ${url}`);
-      return null;
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        const text = await response.text();
+        const data = JSON.parse(text);
+        if (data && (data.items || data.movie || data.status)) {
+          return data;
+        }
+      }
+    } catch (err) {
+      // Tiếp tục thử proxy tiếp theo
     }
-
-    const data = await response.json();
-    return data;
-  } catch (err) {
-    console.error(`Fetch error for ${url}:`, err.message);
-    return null;
   }
+
+  return null;
 }
 
 // 1. Manifest Endpoint
@@ -90,14 +100,11 @@ app.get('/catalog/:type/:id*', async (req, res) => {
     endpoint = `https://phim.nguonc.com/api/films/danh-sach/phim-le?page=1`;
   } else if (id.includes('nguonc_catalog_series') || type === 'series') {
     endpoint = `https://phim.nguonc.com/api/films/danh-sach/phim-bo?page=1`;
+  } else {
+    endpoint = `https://phim.nguonc.com/api/films/phim-moi-cap-nhat?page=1`;
   }
 
   let responseData = await fetchNguonc(endpoint);
-
-  // Thử lại bằng endpoint danh sách mới nhất nếu danh mục theo loại bị lỗi
-  if (!responseData || !responseData.items) {
-    responseData = await fetchNguonc(`https://phim.nguonc.com/api/films/phim-moi-cap-nhat?page=1`);
-  }
 
   if (!responseData) return res.json({ metas: [] });
 
