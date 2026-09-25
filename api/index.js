@@ -1,6 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-const axios = require('axios');
 
 const app = express();
 
@@ -39,43 +38,47 @@ const MANIFEST = {
 
 async function fetchNguonc(url) {
   try {
-    const res = await axios.get(url, { 
-      timeout: 9000,
+    const response = await fetch(url, {
+      method: 'GET',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Referer': 'https://phim.nguonc.com/'
       }
     });
-    return res.data;
+
+    if (!response.ok) return null;
+    return await response.json();
   } catch (err) {
     return null;
   }
 }
 
-// 1. Manifest
+// 1. Manifest Endpoint
 app.get('/manifest.json', (req, res) => {
   res.json(MANIFEST);
 });
 
-// 2. Catalog (Xử lý dứt điểm EmptyContent)
+// 2. Catalog Endpoint
 app.get('/catalog/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
-  const reqPath = req.url;
+  const fullUrl = req.originalUrl || req.url;
 
   let search = null;
   if (req.query.search) {
     search = req.query.search;
-  } else if (reqPath.includes('search=')) {
-    const match = reqPath.match(/search=([^&.]+)/);
+  } else if (fullUrl.includes('search=')) {
+    const match = fullUrl.match(/search=([^&.]+)/);
     if (match) search = decodeURIComponent(match[1]);
   }
 
   let endpoint = '';
   if (search) {
     endpoint = `${API_HOST}/films/search?keyword=${encodeURIComponent(search)}`;
-  } else if (id === 'nguonc_catalog_movie') {
+  } else if (id.includes('nguonc_catalog_movie')) {
     endpoint = `${API_HOST}/films/danh-sach/phim-le?page=1`;
-  } else if (id === 'nguonc_catalog_series') {
+  } else if (id.includes('nguonc_catalog_series')) {
     endpoint = `${API_HOST}/films/danh-sach/phim-bo?page=1`;
   } else {
     return res.json({ metas: [] });
@@ -84,8 +87,7 @@ app.get('/catalog/:type/:id*', async (req, res) => {
   const responseData = await fetchNguonc(endpoint);
   if (!responseData) return res.json({ metas: [] });
 
-  // Lấy mảng danh sách phim linh hoạt dù API trả về theo cấu trúc nào
-  const items = responseData.items || (responseData.data && responseData.data.items) || [];
+  const items = responseData.items || responseData.data?.items || responseData.data || [];
 
   if (!Array.isArray(items) || items.length === 0) {
     return res.json({ metas: [] });
@@ -103,7 +105,7 @@ app.get('/catalog/:type/:id*', async (req, res) => {
   res.json({ metas });
 });
 
-// 3. Meta Details
+// 3. Meta Endpoint
 app.get('/meta/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
   const cleanId = id.replace('.json', '');
@@ -150,7 +152,7 @@ app.get('/meta/:type/:id*', async (req, res) => {
   });
 });
 
-// 4. Stream Link m3u8
+// 4. Stream Endpoint
 app.get('/stream/:type/:id*', async (req, res) => {
   const { id } = req.params;
   const cleanId = id.replace('.json', '');
