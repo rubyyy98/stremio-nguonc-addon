@@ -32,7 +32,12 @@ const MANIFEST = {
 
 async function fetchNguonc(url) {
   try {
-    const res = await axios.get(url, { timeout: 7000 });
+    const res = await axios.get(url, { 
+      timeout: 8000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
     return res.data;
   } catch (err) {
     return null;
@@ -41,13 +46,20 @@ async function fetchNguonc(url) {
 
 // 1. Manifest Endpoint
 app.get('/manifest.json', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.json(MANIFEST);
 });
 
-// 2. Catalog Endpoint (Danh sách / Tìm kiếm)
-app.get('/catalog/:type/:id.json', async (req, res) => {
-  const { type, id } = req.params;
-  const search = req.query.search;
+// 2. Catalog Endpoint (Fix EmptyContent)
+app.get('/catalog/:type/:id/:extra?.json', async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  const { type, id, extra } = req.params;
+
+  let search = null;
+  if (extra) {
+    const searchMatch = extra.match(/search=([^&]+)/);
+    if (searchMatch) search = decodeURIComponent(searchMatch[1]);
+  }
 
   let endpoint = '';
   if (search) {
@@ -61,21 +73,56 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
   }
 
   const data = await fetchNguonc(endpoint);
-  if (!data || !data.items) return res.json({ metas: [] });
+  if (!data || !data.items || !Array.isArray(data.items)) {
+    return res.json({ metas: [] });
+  }
 
   const metas = data.items.map(item => ({
     id: `nguonc:${item.slug}`,
     type: type,
-    name: item.name,
-    poster: item.thumb_url,
-    description: `Cập nhật: ${item.current_episode || ''}`
+    name: item.name || item.origin_name || 'Chưa có tên',
+    poster: item.thumb_url || item.poster_url,
+    posterShape: 'poster',
+    description: item.current_episode ? `Trạng thái: ${item.current_episode}` : ''
   }));
 
   res.json({ metas });
 });
 
-// 3. Meta Endpoint (Thông tin chi tiết)
+// Support fallback route cho Catalog không có extra param
+app.get('/catalog/:type/:id.json', async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  const { type, id } = req.params;
+
+  let endpoint = '';
+  if (id === 'nguonc_catalog_movie') {
+    endpoint = `${API_HOST}/films/danh-sach/phim-le?page=1`;
+  } else if (id === 'nguonc_catalog_series') {
+    endpoint = `${API_HOST}/films/danh-sach/phim-bo?page=1`;
+  } else {
+    return res.json({ metas: [] });
+  }
+
+  const data = await fetchNguonc(endpoint);
+  if (!data || !data.items || !Array.isArray(data.items)) {
+    return res.json({ metas: [] });
+  }
+
+  const metas = data.items.map(item => ({
+    id: `nguonc:${item.slug}`,
+    type: type,
+    name: item.name || item.origin_name || 'Chưa có tên',
+    poster: item.thumb_url || item.poster_url,
+    posterShape: 'poster',
+    description: item.current_episode ? `Trạng thái: ${item.current_episode}` : ''
+  }));
+
+  res.json({ metas });
+});
+
+// 3. Meta Endpoint
 app.get('/meta/:type/:id.json', async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
   const { type, id } = req.params;
   if (!id.startsWith('nguonc:')) return res.json({ meta: {} });
 
@@ -86,9 +133,9 @@ app.get('/meta/:type/:id.json', async (req, res) => {
   const movie = data.movie;
   const videos = [];
 
-  if (movie.episodes && movie.episodes.length > 0) {
+  if (movie.episodes && Array.isArray(movie.episodes)) {
     movie.episodes.forEach(server => {
-      if (server.server_data) {
+      if (server.server_data && Array.isArray(server.server_data)) {
         server.server_data.forEach((ep, index) => {
           videos.push({
             id: `nguonc:${slug}:${ep.slug}`,
@@ -107,7 +154,7 @@ app.get('/meta/:type/:id.json', async (req, res) => {
       id: id,
       type: type,
       name: movie.name,
-      poster: movie.thumb_url,
+      poster: movie.thumb_url || movie.poster_url,
       background: movie.poster_url || movie.thumb_url,
       description: movie.description ? movie.description.replace(/<[^>]*>?/gm, '') : '',
       genres: movie.category ? Object.values(movie.category).map(c => c.name) : [],
@@ -116,8 +163,9 @@ app.get('/meta/:type/:id.json', async (req, res) => {
   });
 });
 
-// 4. Stream Endpoint (Lấy link phát m3u8)
+// 4. Stream Endpoint
 app.get('/stream/:type/:id.json', async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
   const { id } = req.params;
   if (!id.startsWith('nguonc:')) return res.json({ streams: [] });
 
@@ -132,11 +180,11 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   const episodes = data.movie.episodes || [];
 
   episodes.forEach(server => {
-    if (server.server_data) {
+    if (server.server_data && Array.isArray(server.server_data)) {
       const ep = server.server_data.find(e => epSlug ? e.slug === epSlug : true);
       if (ep && ep.link_m3u8) {
         streams.push({
-          title: `Nguonc [${server.server_name || 'HLS'}] - ${ep.name}`,
+          title: `Nguonc [${server.server_name || 'Server'}] - ${ep.name}`,
           type: 'hls',
           url: ep.link_m3u8
         });
@@ -147,7 +195,6 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   res.json({ streams });
 });
 
-// Trang chủ điều hướng
 app.get('/', (req, res) => {
   res.redirect('/manifest.json');
 });
