@@ -35,14 +35,10 @@ const MANIFEST = {
   ]
 };
 
-// Hàm bypass 403 bằng Proxy chuyên dụng & Fallback
 async function fetchNguonc(targetUrl) {
   const proxies = [
-    // 1. Sử dụng proxy bypass Cloudflare của Scraper API
     (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-    // 2. Sử dụng CORS Anywhere mirror
-    (url) => `https://cors-proxy.htmldriven.com/?url=${encodeURIComponent(url)}`,
-    // 3. Fallback Gọi trực tiếp
+    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
     (url) => url
   ];
 
@@ -55,8 +51,7 @@ async function fetchNguonc(targetUrl) {
       const response = await fetch(fetchUrl, {
         method: 'GET',
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          'Accept': 'application/json, text/plain, */*'
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
         },
         signal: controller.signal
       });
@@ -66,14 +61,12 @@ async function fetchNguonc(targetUrl) {
       if (response.ok) {
         const text = await response.text();
         const data = typeof text === 'string' ? JSON.parse(text) : text;
-        
-        // Kiểm tra nếu trả về dữ liệu phim hợp lệ
-        if (data && (data.items || data.movie || data.status === 'success' || data.status === true)) {
+        if (data && (data.items || data.movie || data.data?.items || data.data)) {
           return data;
         }
       }
     } catch (err) {
-      // Thử proxy tiếp theo nếu lỗi
+      // Thử proxy kế tiếp nếu lỗi
     }
   }
 
@@ -111,27 +104,33 @@ app.get('/catalog/:type/:id*', async (req, res) => {
 
   let responseData = await fetchNguonc(endpoint);
 
-  // Nếu gọi danh mục thất bại, fallback thử lại danh sách phim mới
   if (!responseData || (!responseData.items && !responseData.data?.items)) {
     responseData = await fetchNguonc(`https://phim.nguonc.com/api/films/phim-moi-cap-nhat?page=1`);
   }
 
   if (!responseData) return res.json({ metas: [] });
 
-  const items = responseData.items || responseData.data?.items || responseData.data || [];
+  const rawItems = responseData.items || responseData.data?.items || responseData.data || [];
 
-  if (!Array.isArray(items) || items.length === 0) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) {
     return res.json({ metas: [] });
   }
 
-  const metas = items.map(item => ({
-    id: `nguonc:${item.slug}`,
-    type: type || (item.type === 'single' ? 'movie' : 'series'),
-    name: item.name || item.origin_name || 'Phim',
-    poster: item.thumb_url || item.poster_url,
-    posterShape: 'poster',
-    description: item.current_episode ? `Tập: ${item.current_episode}` : ''
-  }));
+  const metas = rawItems.map(item => {
+    let posterUrl = item.thumb_url || item.poster_url || '';
+    if (posterUrl && !posterUrl.startsWith('http')) {
+      posterUrl = `https://phim.nguonc.com${posterUrl.startsWith('/') ? '' : '/'}${posterUrl}`;
+    }
+
+    return {
+      id: `nguonc:${item.slug}`,
+      type: type === 'series' ? 'series' : (item.type === 'single' ? 'movie' : 'series'),
+      name: item.name || item.origin_name || 'Phim',
+      poster: posterUrl,
+      posterShape: 'poster',
+      description: item.current_episode ? `Tập: ${item.current_episode}` : ''
+    };
+  });
 
   res.json({ metas });
 });
@@ -148,6 +147,11 @@ app.get('/meta/:type/:id*', async (req, res) => {
   
   const movie = responseData?.movie || responseData?.data?.movie;
   if (!movie) return res.json({ meta: {} });
+
+  let posterUrl = movie.thumb_url || movie.poster_url || '';
+  if (posterUrl && !posterUrl.startsWith('http')) {
+    posterUrl = `https://phim.nguonc.com${posterUrl.startsWith('/') ? '' : '/'}${posterUrl}`;
+  }
 
   const videos = [];
   const episodes = movie.episodes || [];
@@ -174,8 +178,8 @@ app.get('/meta/:type/:id*', async (req, res) => {
       id: cleanId,
       type: type,
       name: movie.name,
-      poster: movie.thumb_url || movie.poster_url,
-      background: movie.poster_url || movie.thumb_url,
+      poster: posterUrl,
+      background: posterUrl,
       description: movie.description ? movie.description.replace(/<[^>]*>?/gm, '') : '',
       genres: movie.category ? Object.values(movie.category).map(c => c.name) : [],
       videos: videos
