@@ -1,9 +1,13 @@
-const { addonBuilder } = require('stremio-addon-sdk');
+const express = require('express');
+const cors = require('cors');
 const axios = require('axios');
+
+const app = express();
+app.use(cors());
 
 const API_HOST = 'https://phim.nguonc.com/api';
 
-const builder = new addonBuilder({
+const MANIFEST = {
   id: 'org.nguonc.stremio.addon',
   version: '1.0.0',
   name: 'Nguonc Phim',
@@ -24,31 +28,40 @@ const builder = new addonBuilder({
       extra: [{ name: 'search', isRequired: false }]
     }
   ]
-});
+};
 
 async function fetchNguonc(url) {
   try {
-    const res = await axios.get(url, { timeout: 5000 });
+    const res = await axios.get(url, { timeout: 7000 });
     return res.data;
   } catch (err) {
     return null;
   }
 }
 
-builder.defineCatalogHandler(async ({ type, id, extra }) => {
+// 1. Manifest Endpoint
+app.get('/manifest.json', (req, res) => {
+  res.json(MANIFEST);
+});
+
+// 2. Catalog Endpoint (Danh sách / Tìm kiếm)
+app.get('/catalog/:type/:id.json', async (req, res) => {
+  const { type, id } = req.params;
+  const search = req.query.search;
+
   let endpoint = '';
-  if (extra && extra.search) {
-    endpoint = `${API_HOST}/films/search?keyword=${encodeURIComponent(extra.search)}`;
+  if (search) {
+    endpoint = `${API_HOST}/films/search?keyword=${encodeURIComponent(search)}`;
   } else if (id === 'nguonc_catalog_movie') {
     endpoint = `${API_HOST}/films/danh-sach/phim-le?page=1`;
   } else if (id === 'nguonc_catalog_series') {
     endpoint = `${API_HOST}/films/danh-sach/phim-bo?page=1`;
   } else {
-    return { metas: [] };
+    return res.json({ metas: [] });
   }
 
   const data = await fetchNguonc(endpoint);
-  if (!data || !data.items) return { metas: [] };
+  if (!data || !data.items) return res.json({ metas: [] });
 
   const metas = data.items.map(item => ({
     id: `nguonc:${item.slug}`,
@@ -58,15 +71,17 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     description: `Cập nhật: ${item.current_episode || ''}`
   }));
 
-  return { metas };
+  res.json({ metas });
 });
 
-builder.defineMetaHandler(async ({ type, id }) => {
-  if (!id.startsWith('nguonc:')) return { meta: {} };
-  const slug = id.replace('nguonc:', '');
+// 3. Meta Endpoint (Thông tin chi tiết)
+app.get('/meta/:type/:id.json', async (req, res) => {
+  const { type, id } = req.params;
+  if (!id.startsWith('nguonc:')) return res.json({ meta: {} });
 
+  const slug = id.replace('nguonc:', '');
   const data = await fetchNguonc(`${API_HOST}/film/${slug}`);
-  if (!data || !data.movie) return { meta: {} };
+  if (!data || !data.movie) return res.json({ meta: {} });
 
   const movie = data.movie;
   const videos = [];
@@ -87,29 +102,31 @@ builder.defineMetaHandler(async ({ type, id }) => {
     });
   }
 
-  return {
+  res.json({
     meta: {
       id: id,
       type: type,
       name: movie.name,
       poster: movie.thumb_url,
       background: movie.poster_url || movie.thumb_url,
-      description: movie.description?.replace(/<[^>]*>?/gm, '') || '',
+      description: movie.description ? movie.description.replace(/<[^>]*>?/gm, '') : '',
       genres: movie.category ? Object.values(movie.category).map(c => c.name) : [],
       videos: videos
     }
-  };
+  });
 });
 
-builder.defineStreamHandler(async ({ type, id }) => {
-  if (!id.startsWith('nguonc:')) return { streams: [] };
+// 4. Stream Endpoint (Lấy link phát m3u8)
+app.get('/stream/:type/:id.json', async (req, res) => {
+  const { id } = req.params;
+  if (!id.startsWith('nguonc:')) return res.json({ streams: [] });
 
   const parts = id.split(':');
   const slug = parts[1];
   const epSlug = parts[2];
 
   const data = await fetchNguonc(`${API_HOST}/film/${slug}`);
-  if (!data || !data.movie) return { streams: [] };
+  if (!data || !data.movie) return res.json({ streams: [] });
 
   const streams = [];
   const episodes = data.movie.episodes || [];
@@ -127,14 +144,12 @@ builder.defineStreamHandler(async ({ type, id }) => {
     }
   });
 
-  return { streams };
+  res.json({ streams });
 });
 
-const addonInterface = builder.getInterface();
+// Trang chủ điều hướng
+app.get('/', (req, res) => {
+  res.redirect('/manifest.json');
+});
 
-module.exports = (req, res) => {
-  if (req.url === '/' || req.url === '') {
-    req.url = '/manifest.json';
-  }
-  return addonInterface(req, res);
-};
+module.exports = app;
