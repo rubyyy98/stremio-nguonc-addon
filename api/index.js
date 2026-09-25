@@ -4,11 +4,11 @@ const axios = require('axios');
 
 const app = express();
 
-// Cho phép CORS cho tất cả nguồn (Stremio Web & App)
 app.use(cors());
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Content-Type', 'application/json');
   next();
 });
 
@@ -40,9 +40,10 @@ const MANIFEST = {
 async function fetchNguonc(url) {
   try {
     const res = await axios.get(url, { 
-      timeout: 8000,
+      timeout: 9000,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
       }
     });
     return res.data;
@@ -56,18 +57,17 @@ app.get('/manifest.json', (req, res) => {
   res.json(MANIFEST);
 });
 
-// 2. Catalog (Bắt toàn bộ dạng URL Catalog của Stremio để tránh 404)
+// 2. Catalog (Xử lý dứt điểm EmptyContent)
 app.get('/catalog/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
-  const rawParam = req.params[0] || '';
+  const reqPath = req.url;
 
-  // Bắt từ khóa tìm kiếm nếu có
   let search = null;
   if (req.query.search) {
     search = req.query.search;
-  } else if (rawParam.includes('search=')) {
-    const searchMatch = rawParam.match(/search=([^&.]+)/);
-    if (searchMatch) search = decodeURIComponent(searchMatch[1]);
+  } else if (reqPath.includes('search=')) {
+    const match = reqPath.match(/search=([^&.]+)/);
+    if (match) search = decodeURIComponent(match[1]);
   }
 
   let endpoint = '';
@@ -81,18 +81,23 @@ app.get('/catalog/:type/:id*', async (req, res) => {
     return res.json({ metas: [] });
   }
 
-  const data = await fetchNguonc(endpoint);
-  if (!data || !data.items || !Array.isArray(data.items)) {
+  const responseData = await fetchNguonc(endpoint);
+  if (!responseData) return res.json({ metas: [] });
+
+  // Lấy mảng danh sách phim linh hoạt dù API trả về theo cấu trúc nào
+  const items = responseData.items || (responseData.data && responseData.data.items) || [];
+
+  if (!Array.isArray(items) || items.length === 0) {
     return res.json({ metas: [] });
   }
 
-  const metas = data.items.map(item => ({
+  const metas = items.map(item => ({
     id: `nguonc:${item.slug}`,
     type: type,
-    name: item.name || item.origin_name || 'Chưa có tên',
+    name: item.name || item.origin_name || 'Phim',
     poster: item.thumb_url || item.poster_url,
     posterShape: 'poster',
-    description: item.current_episode ? `Trạng thái: ${item.current_episode}` : ''
+    description: item.current_episode ? `Tập: ${item.current_episode}` : ''
   }));
 
   res.json({ metas });
@@ -106,16 +111,19 @@ app.get('/meta/:type/:id*', async (req, res) => {
   if (!cleanId.startsWith('nguonc:')) return res.json({ meta: {} });
 
   const slug = cleanId.replace('nguonc:', '');
-  const data = await fetchNguonc(`${API_HOST}/film/${slug}`);
-  if (!data || !data.movie) return res.json({ meta: {} });
+  const responseData = await fetchNguonc(`${API_HOST}/film/${slug}`);
+  
+  const movie = responseData?.movie || responseData?.data?.movie;
+  if (!movie) return res.json({ meta: {} });
 
-  const movie = data.movie;
   const videos = [];
+  const episodes = movie.episodes || [];
 
-  if (movie.episodes && Array.isArray(movie.episodes)) {
-    movie.episodes.forEach(server => {
-      if (server.server_data && Array.isArray(server.server_data)) {
-        server.server_data.forEach((ep, index) => {
+  if (Array.isArray(episodes)) {
+    episodes.forEach(server => {
+      const serverData = server.server_data || [];
+      if (Array.isArray(serverData)) {
+        serverData.forEach((ep, index) => {
           videos.push({
             id: `nguonc:${slug}:${ep.slug}`,
             title: ep.name || `Tập ${index + 1}`,
@@ -142,7 +150,7 @@ app.get('/meta/:type/:id*', async (req, res) => {
   });
 });
 
-// 4. Stream HLS Link
+// 4. Stream Link m3u8
 app.get('/stream/:type/:id*', async (req, res) => {
   const { id } = req.params;
   const cleanId = id.replace('.json', '');
@@ -153,24 +161,28 @@ app.get('/stream/:type/:id*', async (req, res) => {
   const slug = parts[1];
   const epSlug = parts[2];
 
-  const data = await fetchNguonc(`${API_HOST}/film/${slug}`);
-  if (!data || !data.movie) return res.json({ streams: [] });
+  const responseData = await fetchNguonc(`${API_HOST}/film/${slug}`);
+  const movie = responseData?.movie || responseData?.data?.movie;
+  if (!movie) return res.json({ streams: [] });
 
   const streams = [];
-  const episodes = data.movie.episodes || [];
+  const episodes = movie.episodes || [];
 
-  episodes.forEach(server => {
-    if (server.server_data && Array.isArray(server.server_data)) {
-      const ep = server.server_data.find(e => epSlug ? e.slug === epSlug : true);
-      if (ep && ep.link_m3u8) {
-        streams.push({
-          title: `Nguonc [${server.server_name || 'Server'}] - ${ep.name}`,
-          type: 'hls',
-          url: ep.link_m3u8
-        });
+  if (Array.isArray(episodes)) {
+    episodes.forEach(server => {
+      const serverData = server.server_data || [];
+      if (Array.isArray(serverData)) {
+        const ep = serverData.find(e => epSlug ? e.slug === epSlug : true);
+        if (ep && ep.link_m3u8) {
+          streams.push({
+            title: `Nguonc [${server.server_name || 'Server'}] - ${ep.name}`,
+            type: 'hls',
+            url: ep.link_m3u8
+          });
+        }
       }
-    }
-  });
+    });
+  }
 
   res.json({ streams });
 });
