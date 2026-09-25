@@ -16,7 +16,7 @@ const MANIFEST = {
   id: 'org.nguonc.stremio.addon',
   version: '1.0.0',
   name: 'Nguonc Phim',
-  description: 'Addon xem phim trực tuyến từ Nguonc.com',
+  description: 'Addon xem phim trực tuyến từ Nguonc.com & OPhim',
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
   catalogs: [
@@ -35,18 +35,20 @@ const MANIFEST = {
   ]
 };
 
-async function fetchNguonc(targetUrl) {
-  const proxies = [
-    (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    (url) => url
+// Hàm Fetch thông minh lách Cloudflare & tự động fallback nguồn API dự phòng
+async function fetchApiData(url, fallbackUrl = null) {
+  const proxyList = [
+    (target) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(target)}`,
+    (target) => `https://corsproxy.io/?${encodeURIComponent(target)}`,
+    (target) => target
   ];
 
-  for (const getProxyUrl of proxies) {
+  // 1. Thử các proxy với Nguonc API
+  for (const getProxyUrl of proxyList) {
     try {
-      const fetchUrl = getProxyUrl(targetUrl);
+      const fetchUrl = getProxyUrl(url);
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
 
       const response = await fetch(fetchUrl, {
         method: 'GET',
@@ -60,20 +62,39 @@ async function fetchNguonc(targetUrl) {
 
       if (response.ok) {
         const text = await response.text();
-        const data = typeof text === 'string' ? JSON.parse(text) : text;
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch (e) {
+          data = null;
+        }
+
         if (data && (data.items || data.movie || data.data?.items || data.data)) {
-          return data;
+          return { data, source: 'nguonc' };
         }
       }
     } catch (err) {
-      // Thử proxy kế tiếp nếu lỗi
+      // Tiếp tục thử proxy tiếp theo
+    }
+  }
+
+  // 2. Nếu Nguonc hoàn toàn bị IP Block, chuyển tự động sang OPhim API làm fallback
+  if (fallbackUrl) {
+    try {
+      const response = await fetch(fallbackUrl, { method: 'GET' });
+      if (response.ok) {
+        const data = await response.json();
+        return { data, source: 'ophim' };
+      }
+    } catch (e) {
+      // Fallback failed
     }
   }
 
   return null;
 }
 
-// 1. Manifest Endpoint
+// 1. Manifest
 app.get('/manifest.json', (req, res) => {
   res.json(MANIFEST);
 });
@@ -91,42 +112,56 @@ app.get('/catalog/:type/:id*', async (req, res) => {
     if (match) search = decodeURIComponent(match[1]);
   }
 
-  let endpoint = '';
+  let nguoncUrl = '';
+  let ophimUrl = '';
+
   if (search) {
-    endpoint = `https://phim.nguonc.com/api/films/search?keyword=${encodeURIComponent(search)}`;
+    nguoncUrl = `https://phim.nguonc.com/api/films/search?keyword=${encodeURIComponent(search)}`;
+    ophimUrl = `https://ophim1.com/v1/api/tim-kiem?keyword=${encodeURIComponent(search)}`;
   } else if (id.includes('nguonc_catalog_movie') || type === 'movie') {
-    endpoint = `https://phim.nguonc.com/api/films/danh-sach/phim-le?page=1`;
+    nguoncUrl = `https://phim.nguonc.com/api/films/danh-sach/phim-le?page=1`;
+    ophimUrl = `https://ophim1.com/v1/api/danh-sach/phim-le?page=1`;
   } else if (id.includes('nguonc_catalog_series') || type === 'series') {
-    endpoint = `https://phim.nguonc.com/api/films/danh-sach/phim-bo?page=1`;
+    nguoncUrl = `https://phim.nguonc.com/api/films/danh-sach/phim-bo?page=1`;
+    ophimUrl = `https://ophim1.com/v1/api/danh-sach/phim-bo?page=1`;
   } else {
-    endpoint = `https://phim.nguonc.com/api/films/phim-moi-cap-nhat?page=1`;
+    nguoncUrl = `https://phim.nguonc.com/api/films/phim-moi-cap-nhat?page=1`;
+    ophimUrl = `https://ophim1.com/v1/api/danh-sach/phim-moi-cap-nhat?page=1`;
   }
 
-  let responseData = await fetchNguonc(endpoint);
+  const result = await fetchApiData(nguoncUrl, ophimUrl);
 
-  if (!responseData || (!responseData.items && !responseData.data?.items)) {
-    responseData = await fetchNguonc(`https://phim.nguonc.com/api/films/phim-moi-cap-nhat?page=1`);
+  if (!result || !result.data) return res.json({ metas: [] });
+
+  const { data, source } = result;
+  let items = [];
+
+  if (source === 'nguonc') {
+    items = data.items || data.data?.items || data.data || [];
+  } else {
+    items = data.data?.items || data.items || [];
   }
 
-  if (!responseData) return res.json({ metas: [] });
-
-  const rawItems = responseData.items || responseData.data?.items || responseData.data || [];
-
-  if (!Array.isArray(rawItems) || rawItems.length === 0) {
+  if (!Array.isArray(items) || items.length === 0) {
     return res.json({ metas: [] });
   }
 
-  const metas = rawItems.map(item => {
-    let posterUrl = item.thumb_url || item.poster_url || '';
-    if (posterUrl && !posterUrl.startsWith('http')) {
-      posterUrl = `https://phim.nguonc.com${posterUrl.startsWith('/') ? '' : '/'}${posterUrl}`;
+  const metas = items.map(item => {
+    let slug = item.slug;
+    let name = item.name || item.origin_name || 'Phim';
+    let poster = item.thumb_url || item.poster_url || '';
+
+    if (poster && !poster.startsWith('http')) {
+      poster = source === 'nguonc' 
+        ? `https://phim.nguonc.com${poster.startsWith('/') ? '' : '/'}${poster}`
+        : `https://img.ophim.live/uploads/movies/${poster}`;
     }
 
     return {
-      id: `nguonc:${item.slug}`,
+      id: `${source}:${slug}`,
       type: type === 'series' ? 'series' : (item.type === 'single' ? 'movie' : 'series'),
-      name: item.name || item.origin_name || 'Phim',
-      poster: posterUrl,
+      name: name,
+      poster: poster,
       posterShape: 'poster',
       description: item.current_episode ? `Tập: ${item.current_episode}` : ''
     };
@@ -140,29 +175,42 @@ app.get('/meta/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
   const cleanId = id.replace('.json', '');
   
-  if (!cleanId.startsWith('nguonc:')) return res.json({ meta: {} });
+  const parts = cleanId.split(':');
+  if (parts.length < 2) return res.json({ meta: {} });
 
-  const slug = cleanId.replace('nguonc:', '');
-  const responseData = await fetchNguonc(`https://phim.nguonc.com/api/film/${slug}`);
-  
-  const movie = responseData?.movie || responseData?.data?.movie;
+  const source = parts[0];
+  const slug = parts[1];
+
+  let movie = null;
+  let episodes = [];
+
+  if (source === 'nguonc') {
+    const resData = await fetchApiData(`https://phim.nguonc.com/api/film/${slug}`, `https://ophim1.com/v1/api/phim/${slug}`);
+    movie = resData?.data?.movie || resData?.data?.data?.movie;
+  } else {
+    const resData = await fetchApiData(`https://ophim1.com/v1/api/phim/${slug}`);
+    movie = resData?.data?.data?.item || resData?.data?.movie;
+  }
+
   if (!movie) return res.json({ meta: {} });
 
   let posterUrl = movie.thumb_url || movie.poster_url || '';
   if (posterUrl && !posterUrl.startsWith('http')) {
-    posterUrl = `https://phim.nguonc.com${posterUrl.startsWith('/') ? '' : '/'}${posterUrl}`;
+    posterUrl = source === 'nguonc' 
+      ? `https://phim.nguonc.com${posterUrl.startsWith('/') ? '' : '/'}${posterUrl}`
+      : `https://img.ophim.live/uploads/movies/${posterUrl}`;
   }
 
   const videos = [];
-  const episodes = movie.episodes || [];
+  const epArray = movie.episodes || [];
 
-  if (Array.isArray(episodes)) {
-    episodes.forEach(server => {
+  if (Array.isArray(epArray)) {
+    epArray.forEach(server => {
       const serverData = server.server_data || [];
       if (Array.isArray(serverData)) {
         serverData.forEach((ep, index) => {
           videos.push({
-            id: `nguonc:${slug}:${ep.slug}`,
+            id: `${source}:${slug}:${ep.slug}`,
             title: ep.name || `Tập ${index + 1}`,
             season: 1,
             episode: index + 1,
@@ -180,8 +228,8 @@ app.get('/meta/:type/:id*', async (req, res) => {
       name: movie.name,
       poster: posterUrl,
       background: posterUrl,
-      description: movie.description ? movie.description.replace(/<[^>]*>?/gm, '') : '',
-      genres: movie.category ? Object.values(movie.category).map(c => c.name) : [],
+      description: movie.content ? movie.content.replace(/<[^>]*>?/gm, '') : (movie.description ? movie.description.replace(/<[^>]*>?/gm, '') : ''),
+      genres: movie.category ? (Array.isArray(movie.category) ? movie.category.map(c => c.name) : Object.values(movie.category).map(c => c.name)) : [],
       videos: videos
     }
   });
@@ -192,29 +240,37 @@ app.get('/stream/:type/:id*', async (req, res) => {
   const { id } = req.params;
   const cleanId = id.replace('.json', '');
 
-  if (!cleanId.startsWith('nguonc:')) return res.json({ streams: [] });
-
   const parts = cleanId.split(':');
+  if (parts.length < 2) return res.json({ streams: [] });
+
+  const source = parts[0];
   const slug = parts[1];
   const epSlug = parts[2];
 
-  const responseData = await fetchNguonc(`https://phim.nguonc.com/api/film/${slug}`);
-  const movie = responseData?.movie || responseData?.data?.movie;
+  let movie = null;
+  if (source === 'nguonc') {
+    const resData = await fetchApiData(`https://phim.nguonc.com/api/film/${slug}`, `https://ophim1.com/v1/api/phim/${slug}`);
+    movie = resData?.data?.movie || resData?.data?.data?.movie;
+  } else {
+    const resData = await fetchApiData(`https://ophim1.com/v1/api/phim/${slug}`);
+    movie = resData?.data?.data?.item || resData?.data?.movie;
+  }
+
   if (!movie) return res.json({ streams: [] });
 
   const streams = [];
-  const episodes = movie.episodes || [];
+  const epArray = movie.episodes || [];
 
-  if (Array.isArray(episodes)) {
-    episodes.forEach(server => {
+  if (Array.isArray(epArray)) {
+    epArray.forEach(server => {
       const serverData = server.server_data || [];
       if (Array.isArray(serverData)) {
         const ep = serverData.find(e => epSlug ? e.slug === epSlug : true);
-        if (ep && ep.link_m3u8) {
+        if (ep && (ep.link_m3u8 || ep.link_embed)) {
           streams.push({
-            title: `Nguonc [${server.server_name || 'Server'}] - ${ep.name}`,
+            title: `Server [${server.server_name || 'VIP'}] - ${ep.name}`,
             type: 'hls',
-            url: ep.link_m3u8
+            url: ep.link_m3u8 || ep.link_embed
           });
         }
       }
