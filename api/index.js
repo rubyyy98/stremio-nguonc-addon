@@ -15,8 +15,8 @@ app.use((req, res, next) => {
 const MANIFEST = {
   id: 'org.nguonc.stremio.addon',
   version: '1.0.0',
-  name: 'Phim Vietsub (Nguonc & KKPhim)',
-  description: 'Xem phim Vietsub HD trực tuyến cho Stremio',
+  name: 'Phim Vietsub HD',
+  description: 'Addon xem phim Vietsub tốc độ cao cho Stremio',
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
   catalogs: [
@@ -35,37 +35,30 @@ const MANIFEST = {
   ]
 };
 
-// Hàm gửi request an toàn với Timeout
-async function safeFetchJson(url) {
+// Fetch với timeout ngắn (2.5 giây)
+async function fetchWithTimeout(url, timeoutMs = 2500) {
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 7000);
-
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     const res = await fetch(url, {
       method: 'GET',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       },
       signal: controller.signal
     });
-
-    clearTimeout(timeoutId);
-
-    if (res.ok) {
-      return await res.json();
-    }
-  } catch (err) {
-    // Return null if request fails or times out
+    clearTimeout(timer);
+    if (res.ok) return await res.json();
+  } catch (e) {
+    return null;
   }
   return null;
 }
 
-// 1. Manifest Endpoint
-app.get('/manifest.json', (req, res) => {
-  res.json(MANIFEST);
-});
+// 1. Manifest
+app.get('/manifest.json', (req, res) => res.json(MANIFEST));
 
-// 2. Catalog Endpoint
+// 2. Catalog
 app.get('/catalog/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
   const fullUrl = req.originalUrl || req.url;
@@ -78,48 +71,39 @@ app.get('/catalog/:type/:id*', async (req, res) => {
     if (match) search = decodeURIComponent(match[1]);
   }
 
-  let items = [];
+  let kkUrl = '';
+  let nguoncUrl = '';
 
   if (search) {
-    // Thử KKPhim Search
-    let data = await safeFetchJson(`https://phimapi.com/v1/api/tim-kiem?keyword=${encodeURIComponent(search)}`);
-    items = data?.data?.items || [];
-
-    // Nếu rỗng thử Nguonc Search
-    if (items.length === 0) {
-      data = await safeFetchJson(`https://phim.nguonc.com/api/films/search?keyword=${encodeURIComponent(search)}`);
-      items = data?.items || data?.data?.items || [];
-    }
+    kkUrl = `https://phimapi.com/v1/api/tim-kiem?keyword=${encodeURIComponent(search)}`;
+    nguoncUrl = `https://phim.nguonc.com/api/films/search?keyword=${encodeURIComponent(search)}`;
   } else {
-    let urlKK = 'https://phimapi.com/v1/api/danh-sach/phim-le?page=1';
-    let urlNguonc = 'https://phim.nguonc.com/api/films/danh-sach/phim-le?page=1';
-
-    if (id.includes('series') || type === 'series') {
-      urlKK = 'https://phimapi.com/v1/api/danh-sach/phim-bo?page=1';
-      urlNguonc = 'https://phim.nguonc.com/api/films/danh-sach/phim-bo?page=1';
-    }
-
-    // Ưu tiên KKPhim/PhimAPI (Tốc độ cao & không block Vercel)
-    let data = await safeFetchJson(urlKK);
-    items = data?.data?.items || [];
-
-    // Fallback sang Nguonc
-    if (items.length === 0) {
-      data = await safeFetchJson(urlNguonc);
-      items = data?.items || data?.data?.items || [];
-    }
+    const isSeries = id.includes('series') || type === 'series';
+    kkUrl = isSeries 
+      ? 'https://phimapi.com/v1/api/danh-sach/phim-bo?page=1' 
+      : 'https://phimapi.com/v1/api/danh-sach/phim-le?page=1';
+    nguoncUrl = isSeries 
+      ? 'https://phim.nguonc.com/api/films/danh-sach/phim-bo?page=1' 
+      : 'https://phim.nguonc.com/api/films/danh-sach/phim-le?page=1';
   }
 
-  if (!Array.isArray(items) || items.length === 0) {
+  // Gọi song song cả 2 API, nguồn nào trả về trước lấy nguồn đó
+  const dataKK = await fetchWithTimeout(kkUrl);
+  let items = dataKK?.data?.items || [];
+
+  if (!items.length) {
+    const dataNguonc = await fetchWithTimeout(nguoncUrl);
+    items = dataNguonc?.items || dataNguonc?.data?.items || [];
+  }
+
+  if (!Array.isArray(items) || !items.length) {
     return res.json({ metas: [] });
   }
 
   const metas = items.map(item => {
     let poster = item.poster_url || item.thumb_url || '';
-    
     if (poster && !poster.startsWith('http')) {
-      const cdnUrl = data?.data?.APP_DOMAIN_CDN_IMAGE || 'https://phimimg.com';
-      poster = `${cdnUrl}/${poster.startsWith('/') ? poster.slice(1) : poster}`;
+      poster = `https://phimimg.com/${poster.startsWith('/') ? poster.slice(1) : poster}`;
     }
 
     return {
@@ -128,27 +112,23 @@ app.get('/catalog/:type/:id*', async (req, res) => {
       name: item.name || item.origin_name || 'Phim',
       poster: poster,
       posterShape: 'poster',
-      description: item.current_episode ? `Trạng thái: ${item.current_episode}` : (item.year ? `Năm: ${item.year}` : '')
+      description: item.current_episode ? `Tập: ${item.current_episode}` : ''
     };
   });
 
   res.json({ metas });
 });
 
-// 3. Meta Endpoint
+// 3. Meta
 app.get('/meta/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
   const cleanId = id.replace('.json', '');
   const slug = cleanId.replace('phim:', '').replace('nguonc:', '');
 
-  let data = await safeFetchJson(`https://phimapi.com/phim/${slug}`);
-  let movie = data?.movie;
+  const data = await fetchWithTimeout(`https://phimapi.com/phim/${slug}`) || 
+               await fetchWithTimeout(`https://phim.nguonc.com/api/film/${slug}`);
 
-  if (!movie) {
-    data = await safeFetchJson(`https://phim.nguonc.com/api/film/${slug}`);
-    movie = data?.movie || data?.data?.movie;
-  }
-
+  const movie = data?.movie || data?.data?.movie;
   if (!movie) return res.json({ meta: {} });
 
   let posterUrl = movie.poster_url || movie.thumb_url || '';
@@ -190,27 +170,20 @@ app.get('/meta/:type/:id*', async (req, res) => {
   });
 });
 
-// 4. Stream Endpoint
+// 4. Stream
 app.get('/stream/:type/:id*', async (req, res) => {
   const { id } = req.params;
   const cleanId = id.replace('.json', '');
   const parts = cleanId.replace('stream:', '').split(':');
-
   const slug = parts[0];
   const epSlug = parts[1];
 
-  let streams = [];
+  const data = await fetchWithTimeout(`https://phimapi.com/phim/${slug}`) || 
+               await fetchWithTimeout(`https://phim.nguonc.com/api/film/${slug}`);
 
-  // Thử nguồn PhimAPI / KKPhim
-  let data = await safeFetchJson(`https://phimapi.com/phim/${slug}`);
-  let movie = data?.movie;
-  let episodes = data?.episodes || movie?.episodes || [];
-
-  if (!movie) {
-    data = await safeFetchJson(`https://phim.nguonc.com/api/film/${slug}`);
-    movie = data?.movie || data?.data?.movie;
-    episodes = movie?.episodes || [];
-  }
+  const movie = data?.movie || data?.data?.movie;
+  const episodes = data?.episodes || movie?.episodes || [];
+  const streams = [];
 
   if (Array.isArray(episodes)) {
     episodes.forEach(server => {
@@ -231,8 +204,6 @@ app.get('/stream/:type/:id*', async (req, res) => {
   res.json({ streams });
 });
 
-app.get('/', (req, res) => {
-  res.redirect('/manifest.json');
-});
+app.get('/', (req, res) => res.redirect('/manifest.json'));
 
 module.exports = app;
