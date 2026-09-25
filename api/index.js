@@ -14,29 +14,67 @@ app.use((req, res, next) => {
 
 const MANIFEST = {
   id: 'org.nguonc.stremio.addon',
-  version: '1.0.1',
+  version: '1.0.2',
   name: 'Phim Vietsub HD',
-  description: 'Addon xem phim Vietsub tốc độ cao cho Stremio',
+  description: 'Addon xem phim Vietsub phân loại Quốc gia tốc độ cao cho Stremio',
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
   catalogs: [
+    // --- PHIM LẺ ---
     {
       type: 'movie',
-      id: 'nguonc_catalog_movie',
-      name: 'Phim Lẻ Vietsub',
-      extra: [
-        { name: 'search', isRequired: false },
-        { name: 'skip', isRequired: false }
-      ]
+      id: 'movie_all',
+      name: 'Phim Lẻ - Tất Cả',
+      extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }]
+    },
+    {
+      type: 'movie',
+      id: 'movie_trung_quoc',
+      name: 'Phim Lẻ - Trung Quốc',
+      extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }]
+    },
+    {
+      type: 'movie',
+      id: 'movie_han_quoc',
+      name: 'Phim Lẻ - Hàn Quốc',
+      extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }]
+    },
+    {
+      type: 'movie',
+      id: 'movie_au_my',
+      name: 'Phim Lẻ - Âu Mỹ',
+      extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }]
+    },
+    // --- PHIM BỘ ---
+    {
+      type: 'series',
+      id: 'series_all',
+      name: 'Phim Bộ - Tất Cả',
+      extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }]
     },
     {
       type: 'series',
-      id: 'nguonc_catalog_series',
-      name: 'Phim Bộ Vietsub',
-      extra: [
-        { name: 'search', isRequired: false },
-        { name: 'skip', isRequired: false }
-      ]
+      id: 'series_trung_quoc',
+      name: 'Phim Bộ - Trung Quốc',
+      extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }]
+    },
+    {
+      type: 'series',
+      id: 'series_han_quoc',
+      name: 'Phim Bộ - Hàn Quốc',
+      extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }]
+    },
+    {
+      type: 'series',
+      id: 'series_au_my',
+      name: 'Phim Bộ - Âu Mỹ',
+      extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }]
+    },
+    {
+      type: 'series',
+      id: 'series_hoat_hinh',
+      name: 'Phim Bộ - Hoạt Hình / Anime',
+      extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }]
     }
   ]
 };
@@ -64,7 +102,7 @@ async function fetchWithTimeout(url, timeoutMs = 3000) {
 // 1. Manifest
 app.get('/manifest.json', (req, res) => res.json(MANIFEST));
 
-// 2. Catalog (Tính toán trang dựa trên skip)
+// 2. Catalog
 app.get('/catalog/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
   const fullUrl = req.originalUrl || req.url;
@@ -77,7 +115,6 @@ app.get('/catalog/:type/:id*', async (req, res) => {
     if (match) search = decodeURIComponent(match[1]);
   }
 
-  // Lấy thông số skip để tính trang (Mỗi trang API trả về khoảng 24 phim)
   let skip = 0;
   if (req.query.skip) {
     skip = parseInt(req.query.skip) || 0;
@@ -86,7 +123,6 @@ app.get('/catalog/:type/:id*', async (req, res) => {
     if (match) skip = parseInt(match[1]) || 0;
   }
 
-  // Tính số trang API tương ứng (Page = skip / 24 + 1)
   const page = Math.floor(skip / 24) + 1;
 
   let kkUrl = '';
@@ -96,16 +132,31 @@ app.get('/catalog/:type/:id*', async (req, res) => {
     kkUrl = `https://phimapi.com/v1/api/tim-kiem?keyword=${encodeURIComponent(search)}&page=${page}`;
     nguoncUrl = `https://phim.nguonc.com/api/films/search?keyword=${encodeURIComponent(search)}&page=${page}`;
   } else {
-    const isSeries = id.includes('series') || type === 'series';
-    kkUrl = isSeries 
-      ? `https://phimapi.com/v1/api/danh-sach/phim-bo?page=${page}` 
-      : `https://phimapi.com/v1/api/danh-sach/phim-le?page=${page}`;
-    nguoncUrl = isSeries 
-      ? `https://phim.nguonc.com/api/films/danh-sach/phim-bo?page=${page}` 
-      : `https://phim.nguonc.com/api/films/danh-sach/phim-le?page=${page}`;
+    // Xử lý bộ lọc theo id catalog
+    if (id.includes('trung_quoc')) {
+      kkUrl = `https://phimapi.com/v1/api/quoc-gia/trung-quoc?page=${page}`;
+      nguoncUrl = `https://phim.nguonc.com/api/films/quoc-gia/trung-quoc?page=${page}`;
+    } else if (id.includes('han_quoc')) {
+      kkUrl = `https://phimapi.com/v1/api/quoc-gia/han-quoc?page=${page}`;
+      nguoncUrl = `https://phim.nguonc.com/api/films/quoc-gia/han-quoc?page=${page}`;
+    } else if (id.includes('au_my')) {
+      kkUrl = `https://phimapi.com/v1/api/quoc-gia/au-my?page=${page}`;
+      nguoncUrl = `https://phim.nguonc.com/api/films/quoc-gia/au-my?page=${page}`;
+    } else if (id.includes('hoat_hinh')) {
+      kkUrl = `https://phimapi.com/v1/api/danh-sach/hoat-hinh?page=${page}`;
+      nguoncUrl = `https://phim.nguonc.com/api/films/danh-sach/hoat-hinh?page=${page}`;
+    } else {
+      const isSeries = id.includes('series') || type === 'series';
+      kkUrl = isSeries 
+        ? `https://phimapi.com/v1/api/danh-sach/phim-bo?page=${page}` 
+        : `https://phimapi.com/v1/api/danh-sach/phim-le?page=${page}`;
+      nguoncUrl = isSeries 
+        ? `https://phim.nguonc.com/api/films/danh-sach/phim-bo?page=${page}` 
+        : `https://phim.nguonc.com/api/films/danh-sach/phim-le?page=${page}`;
+    }
   }
 
-  // Gọi song song API
+  // Gọi API lấy dữ liệu
   const dataKK = await fetchWithTimeout(kkUrl);
   let items = dataKK?.data?.items || [];
 
