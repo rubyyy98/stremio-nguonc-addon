@@ -6,12 +6,11 @@ const app = express();
 app.use(cors());
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
-  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
   next();
 });
-
-const API_HOST = 'https://phim.nguonc.com/api';
 
 const MANIFEST = {
   id: 'org.nguonc.stremio.addon',
@@ -38,19 +37,30 @@ const MANIFEST = {
 
 async function fetchNguonc(url) {
   try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+
     const response = await fetch(url, {
       method: 'GET',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Referer': 'https://phim.nguonc.com/'
-      }
+        'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7'
+      },
+      signal: controller.signal
     });
 
-    if (!response.ok) return null;
-    return await response.json();
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      console.error(`HTTP error! status: ${response.status} for url: ${url}`);
+      return null;
+    }
+
+    const data = await response.json();
+    return data;
   } catch (err) {
+    console.error(`Fetch error for ${url}:`, err.message);
     return null;
   }
 }
@@ -75,16 +85,20 @@ app.get('/catalog/:type/:id*', async (req, res) => {
 
   let endpoint = '';
   if (search) {
-    endpoint = `${API_HOST}/films/search?keyword=${encodeURIComponent(search)}`;
-  } else if (id.includes('nguonc_catalog_movie')) {
-    endpoint = `${API_HOST}/films/danh-sach/phim-le?page=1`;
-  } else if (id.includes('nguonc_catalog_series')) {
-    endpoint = `${API_HOST}/films/danh-sach/phim-bo?page=1`;
-  } else {
-    return res.json({ metas: [] });
+    endpoint = `https://phim.nguonc.com/api/films/search?keyword=${encodeURIComponent(search)}`;
+  } else if (id.includes('nguonc_catalog_movie') || type === 'movie') {
+    endpoint = `https://phim.nguonc.com/api/films/danh-sach/phim-le?page=1`;
+  } else if (id.includes('nguonc_catalog_series') || type === 'series') {
+    endpoint = `https://phim.nguonc.com/api/films/danh-sach/phim-bo?page=1`;
   }
 
-  const responseData = await fetchNguonc(endpoint);
+  let responseData = await fetchNguonc(endpoint);
+
+  // Thử lại bằng endpoint danh sách mới nhất nếu danh mục theo loại bị lỗi
+  if (!responseData || !responseData.items) {
+    responseData = await fetchNguonc(`https://phim.nguonc.com/api/films/phim-moi-cap-nhat?page=1`);
+  }
+
   if (!responseData) return res.json({ metas: [] });
 
   const items = responseData.items || responseData.data?.items || responseData.data || [];
@@ -95,7 +109,7 @@ app.get('/catalog/:type/:id*', async (req, res) => {
 
   const metas = items.map(item => ({
     id: `nguonc:${item.slug}`,
-    type: type,
+    type: type || (item.type === 'single' ? 'movie' : 'series'),
     name: item.name || item.origin_name || 'Phim',
     poster: item.thumb_url || item.poster_url,
     posterShape: 'poster',
@@ -113,7 +127,7 @@ app.get('/meta/:type/:id*', async (req, res) => {
   if (!cleanId.startsWith('nguonc:')) return res.json({ meta: {} });
 
   const slug = cleanId.replace('nguonc:', '');
-  const responseData = await fetchNguonc(`${API_HOST}/film/${slug}`);
+  const responseData = await fetchNguonc(`https://phim.nguonc.com/api/film/${slug}`);
   
   const movie = responseData?.movie || responseData?.data?.movie;
   if (!movie) return res.json({ meta: {} });
@@ -163,7 +177,7 @@ app.get('/stream/:type/:id*', async (req, res) => {
   const slug = parts[1];
   const epSlug = parts[2];
 
-  const responseData = await fetchNguonc(`${API_HOST}/film/${slug}`);
+  const responseData = await fetchNguonc(`https://phim.nguonc.com/api/film/${slug}`);
   const movie = responseData?.movie || responseData?.data?.movie;
   if (!movie) return res.json({ streams: [] });
 
