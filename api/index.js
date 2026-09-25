@@ -3,7 +3,14 @@ const cors = require('cors');
 const axios = require('axios');
 
 const app = express();
+
+// Cho phép CORS cho tất cả nguồn (Stremio Web & App)
 app.use(cors());
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  next();
+});
 
 const API_HOST = 'https://phim.nguonc.com/api';
 
@@ -44,20 +51,22 @@ async function fetchNguonc(url) {
   }
 }
 
-// 1. Manifest Endpoint
+// 1. Manifest
 app.get('/manifest.json', (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
   res.json(MANIFEST);
 });
 
-// 2. Catalog Endpoint (Fix EmptyContent)
-app.get('/catalog/:type/:id/:extra?.json', async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  const { type, id, extra } = req.params;
+// 2. Catalog (Bắt toàn bộ dạng URL Catalog của Stremio để tránh 404)
+app.get('/catalog/:type/:id*', async (req, res) => {
+  const { type, id } = req.params;
+  const rawParam = req.params[0] || '';
 
+  // Bắt từ khóa tìm kiếm nếu có
   let search = null;
-  if (extra) {
-    const searchMatch = extra.match(/search=([^&]+)/);
+  if (req.query.search) {
+    search = req.query.search;
+  } else if (rawParam.includes('search=')) {
+    const searchMatch = rawParam.match(/search=([^&.]+)/);
     if (searchMatch) search = decodeURIComponent(searchMatch[1]);
   }
 
@@ -89,44 +98,14 @@ app.get('/catalog/:type/:id/:extra?.json', async (req, res) => {
   res.json({ metas });
 });
 
-// Support fallback route cho Catalog không có extra param
-app.get('/catalog/:type/:id.json', async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+// 3. Meta Details
+app.get('/meta/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
+  const cleanId = id.replace('.json', '');
+  
+  if (!cleanId.startsWith('nguonc:')) return res.json({ meta: {} });
 
-  let endpoint = '';
-  if (id === 'nguonc_catalog_movie') {
-    endpoint = `${API_HOST}/films/danh-sach/phim-le?page=1`;
-  } else if (id === 'nguonc_catalog_series') {
-    endpoint = `${API_HOST}/films/danh-sach/phim-bo?page=1`;
-  } else {
-    return res.json({ metas: [] });
-  }
-
-  const data = await fetchNguonc(endpoint);
-  if (!data || !data.items || !Array.isArray(data.items)) {
-    return res.json({ metas: [] });
-  }
-
-  const metas = data.items.map(item => ({
-    id: `nguonc:${item.slug}`,
-    type: type,
-    name: item.name || item.origin_name || 'Chưa có tên',
-    poster: item.thumb_url || item.poster_url,
-    posterShape: 'poster',
-    description: item.current_episode ? `Trạng thái: ${item.current_episode}` : ''
-  }));
-
-  res.json({ metas });
-});
-
-// 3. Meta Endpoint
-app.get('/meta/:type/:id.json', async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  const { type, id } = req.params;
-  if (!id.startsWith('nguonc:')) return res.json({ meta: {} });
-
-  const slug = id.replace('nguonc:', '');
+  const slug = cleanId.replace('nguonc:', '');
   const data = await fetchNguonc(`${API_HOST}/film/${slug}`);
   if (!data || !data.movie) return res.json({ meta: {} });
 
@@ -151,7 +130,7 @@ app.get('/meta/:type/:id.json', async (req, res) => {
 
   res.json({
     meta: {
-      id: id,
+      id: cleanId,
       type: type,
       name: movie.name,
       poster: movie.thumb_url || movie.poster_url,
@@ -163,13 +142,14 @@ app.get('/meta/:type/:id.json', async (req, res) => {
   });
 });
 
-// 4. Stream Endpoint
-app.get('/stream/:type/:id.json', async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+// 4. Stream HLS Link
+app.get('/stream/:type/:id*', async (req, res) => {
   const { id } = req.params;
-  if (!id.startsWith('nguonc:')) return res.json({ streams: [] });
+  const cleanId = id.replace('.json', '');
 
-  const parts = id.split(':');
+  if (!cleanId.startsWith('nguonc:')) return res.json({ streams: [] });
+
+  const parts = cleanId.split(':');
   const slug = parts[1];
   const epSlug = parts[2];
 
