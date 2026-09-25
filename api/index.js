@@ -37,7 +37,6 @@ async function fetchNguonc(url) {
 
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
   let endpoint = '';
-  
   if (extra && extra.search) {
     endpoint = `${API_HOST}/films/search?keyword=${encodeURIComponent(extra.search)}`;
   } else if (id === 'nguonc_catalog_movie') {
@@ -132,15 +131,10 @@ builder.defineStreamHandler(async ({ type, id }) => {
 });
 
 const addonInterface = builder.getInterface();
+
 module.exports = (req, res) => {
-  if (req.url === '/') {
-    res.writeHead(302, { Location: '/manifest.json' });
-    res.end();
-    return;
+  if (req.url === '/' || req.url === '') {
+    req.url = '/manifest.json';
   }
-  
-  addonInterface(req, res, () => {
-    res.statusCode = 404;
-    res.end();
-  });
+  return addonInterface(req, res);
 };
