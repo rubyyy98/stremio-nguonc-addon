@@ -35,25 +35,28 @@ const MANIFEST = {
   ]
 };
 
-// Hàm fetch tự động bypass 403 qua Proxy
+// Hàm bypass 403 bằng Proxy chuyên dụng & Fallback
 async function fetchNguonc(targetUrl) {
-  // Danh sách các proxy dự phòng để lách Cloudflare 403
   const proxies = [
-    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    (url) => url // Gọi trực tiếp nếu proxy thất bại
+    // 1. Sử dụng proxy bypass Cloudflare của Scraper API
+    (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    // 2. Sử dụng CORS Anywhere mirror
+    (url) => `https://cors-proxy.htmldriven.com/?url=${encodeURIComponent(url)}`,
+    // 3. Fallback Gọi trực tiếp
+    (url) => url
   ];
 
   for (const getProxyUrl of proxies) {
     try {
       const fetchUrl = getProxyUrl(targetUrl);
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 7000);
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
 
       const response = await fetch(fetchUrl, {
         method: 'GET',
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'application/json, text/plain, */*'
         },
         signal: controller.signal
       });
@@ -62,13 +65,15 @@ async function fetchNguonc(targetUrl) {
 
       if (response.ok) {
         const text = await response.text();
-        const data = JSON.parse(text);
-        if (data && (data.items || data.movie || data.status)) {
+        const data = typeof text === 'string' ? JSON.parse(text) : text;
+        
+        // Kiểm tra nếu trả về dữ liệu phim hợp lệ
+        if (data && (data.items || data.movie || data.status === 'success' || data.status === true)) {
           return data;
         }
       }
     } catch (err) {
-      // Tiếp tục thử proxy tiếp theo
+      // Thử proxy tiếp theo nếu lỗi
     }
   }
 
@@ -105,6 +110,11 @@ app.get('/catalog/:type/:id*', async (req, res) => {
   }
 
   let responseData = await fetchNguonc(endpoint);
+
+  // Nếu gọi danh mục thất bại, fallback thử lại danh sách phim mới
+  if (!responseData || (!responseData.items && !responseData.data?.items)) {
+    responseData = await fetchNguonc(`https://phim.nguonc.com/api/films/phim-moi-cap-nhat?page=1`);
+  }
 
   if (!responseData) return res.json({ metas: [] });
 
