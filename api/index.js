@@ -13,9 +13,9 @@ app.use((req, res, next) => {
 
 const MANIFEST = {
   id: 'org.nguonc.stremio.addon',
-  version: '1.2.0',
-  name: 'Phim Vietsub HD',
-  description: 'Addon xem phim Vietsub tốc độ cao cho Stremio',
+  version: '1.3.0',
+  name: 'Phim Vietsub HD (No Ads)',
+  description: 'Addon xem phim Vietsub tốc độ cao, hỗ trợ bóc tách quảng cáo cho Stremio',
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
   catalogs: [
@@ -51,7 +51,70 @@ async function fetchWithTimeout(url, timeoutMs = 4000) {
 // 1. Manifest
 app.get('/manifest.json', (req, res) => res.json(MANIFEST));
 
-// 2. Catalog
+// 2. Route lọc Quảng Cáo M3U8 chuẩn định dạng HLS
+app.get('/m3u8-clean', async (req, res) => {
+  const targetUrl = req.query.url;
+  if (!targetUrl) return res.status(400).send('Missing url parameter');
+
+  try {
+    const decodedUrl = decodeURIComponent(targetUrl);
+    const response = await fetch(decodedUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'Referer': new URL(decodedUrl).origin + '/'
+      }
+    });
+
+    if (!response.ok) return res.status(response.status).send('Error fetching M3U8');
+
+    const body = await response.text();
+    const baseUrl = decodedUrl.substring(0, decodedUrl.lastIndexOf('/') + 1);
+    const lines = body.split('\n');
+    const cleanedLines = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      let line = lines[i].trim();
+      if (!line) continue;
+
+      // Bỏ qua tag ngắt gián đoạn quảng cáo
+      if (line.startsWith('#EXT-X-DISCONTINUITY')) {
+        continue;
+      }
+
+      // Phát hiện cặp tag #EXTINF và URL phân đoạn
+      if (line.startsWith('#EXTINF:')) {
+        const nextLine = lines[i + 1] ? lines[i + 1].trim() : '';
+        
+        // Nhận diện từ khóa QC hoặc domain QC (9922, bet, ads, intro, v.v.)
+        const isAd = line.includes('ads') || line.includes('qc') || line.includes('9922') || line.includes('bet') ||
+                     nextLine.includes('ads') || nextLine.includes('qc') || nextLine.includes('9922') || nextLine.includes('bet');
+
+        if (isAd) {
+          i++; // Nhảy qua cả dòng URL quảng cáo phía dưới
+          continue;
+        }
+      }
+
+      // Chuyển tất cả link phân đoạn .ts tương đối thành Absolute Full HTTPS URL
+      if (!line.startsWith('#')) {
+        if (!line.startsWith('http://') && !line.startsWith('https://')) {
+          line = new URL(line, baseUrl).href;
+        }
+      }
+
+      cleanedLines.push(line);
+    }
+
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.status(200).send(cleanedLines.join('\n'));
+  } catch (err) {
+    res.status(500).send('Proxy filter error');
+  }
+});
+
+// 3. Catalog Endpoint
 app.get('/catalog/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
   const fullUrl = req.originalUrl || req.url;
@@ -105,8 +168,6 @@ app.get('/catalog/:type/:id*', async (req, res) => {
 
   const itemsKK = dataKK?.data?.items || [];
   const itemsNC = dataNguonc?.items || dataNguonc?.data?.items || [];
-  
-  // Merge kết quả từ cả 2 nguồn để đảm bảo đầy đủ phim
   const combined = [...itemsKK, ...itemsNC];
   const uniqueMap = new Map();
 
@@ -117,10 +178,7 @@ app.get('/catalog/:type/:id*', async (req, res) => {
   });
 
   const items = Array.from(uniqueMap.values());
-
-  if (!items.length) {
-    return res.json({ metas: [] });
-  }
+  if (!items.length) return res.json({ metas: [] });
 
   const metas = items.map(item => {
     let poster = item.poster_url || item.thumb_url || '';
@@ -141,7 +199,7 @@ app.get('/catalog/:type/:id*', async (req, res) => {
   res.json({ metas });
 });
 
-// 3. Meta
+// 4. Meta Endpoint
 app.get('/meta/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
   const cleanId = id.replace('.json', '');
@@ -163,7 +221,6 @@ app.get('/meta/:type/:id*', async (req, res) => {
   const videos = [];
   const episodesKK = dataKK?.episodes || movie?.episodes || [];
   const episodesNC = dataNC?.episodes || [];
-  
   const allEpisodes = [...episodesKK, ...episodesNC];
 
   if (Array.isArray(allEpisodes)) {
@@ -199,7 +256,7 @@ app.get('/meta/:type/:id*', async (req, res) => {
   });
 });
 
-// 4. Stream Endpoint (Trả về link kèm Headers tối ưu cho Stremio)
+// 5. Stream Endpoint (Kết hợp VIP Clean Proxy & Direct Backup)
 app.get('/stream/:type/:id*', async (req, res) => {
   const { id } = req.params;
   const cleanId = id.replace('.json', '');
@@ -213,17 +270,38 @@ app.get('/stream/:type/:id*', async (req, res) => {
   ]);
 
   const streams = [];
+  const host = req.get('host');
+  const protocol = req.headers['x-forwarded-proto'] || 'https';
 
-  // Lấy danh sách server từ PhimAPI
-  const episodesKK = dataKK?.episodes || dataKK?.movie?.episodes || [];
-  if (Array.isArray(episodesKK)) {
-    episodesKK.forEach((server, sIdx) => {
+  const processEpisodes = (episodes, sourceName) => {
+    if (!Array.isArray(episodes)) return;
+    episodes.forEach((server, sIdx) => {
       const serverData = server.server_data || [];
       const ep = serverData.find((e, idx) => epSlug ? (e.slug === epSlug || idx.toString() === epSlug) : true);
+      
       if (ep && ep.link_m3u8) {
+        // Server Lọc QC (M3U8 Clean)
+        const cleanProxyUrl = `${protocol}://${host}/m3u8-clean?url=${encodeURIComponent(ep.link_m3u8)}`;
         streams.push({
-          name: `[Server PhimAPI]`,
-          title: `${server.server_name || 'Server ' + (sIdx + 1)} - ${ep.name}`,
+          name: `[${sourceName} - VIP Clean]`,
+          title: `${server.server_name || 'Server ' + (sIdx + 1)} - Lọc QC (Smooth Seek) - ${ep.name}`,
+          type: 'hls',
+          url: cleanProxyUrl,
+          behaviorHints: {
+            notSupported: false,
+            proxyHeaders: {
+              request: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                'Referer': new URL(ep.link_m3u8).origin + '/'
+              }
+            }
+          }
+        });
+
+        // Server Direct Gốc
+        streams.push({
+          name: `[${sourceName} - Gốc]`,
+          title: `${server.server_name || 'Server ' + (sIdx + 1)} - Link Gốc - ${ep.name}`,
           type: 'hls',
           url: ep.link_m3u8,
           behaviorHints: {
@@ -231,40 +309,17 @@ app.get('/stream/:type/:id*', async (req, res) => {
             proxyHeaders: {
               request: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                'Referer': 'https://phimapi.com/'
+                'Referer': new URL(ep.link_m3u8).origin + '/'
               }
             }
           }
         });
       }
     });
-  }
+  };
 
-  // Lấy danh sách server từ NguonC
-  const episodesNC = dataNC?.episodes || dataNC?.movie?.episodes || [];
-  if (Array.isArray(episodesNC)) {
-    episodesNC.forEach((server, sIdx) => {
-      const serverData = server.server_data || [];
-      const ep = serverData.find((e, idx) => epSlug ? (e.slug === epSlug || idx.toString() === epSlug) : true);
-      if (ep && ep.link_m3u8) {
-        streams.push({
-          name: `[Server NguonC]`,
-          title: `${server.server_name || 'Server ' + (sIdx + 1)} - ${ep.name}`,
-          type: 'hls',
-          url: ep.link_m3u8,
-          behaviorHints: {
-            notSupported: false,
-            proxyHeaders: {
-              request: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                'Referer': 'https://phim.nguonc.com/'
-              }
-            }
-          }
-        });
-      }
-    });
-  }
+  processEpisodes(dataKK?.episodes || dataKK?.movie?.episodes, 'PhimAPI');
+  processEpisodes(dataNC?.episodes || dataNC?.movie?.episodes, 'NguonC');
 
   res.json({ streams });
 });
