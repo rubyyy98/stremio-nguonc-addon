@@ -13,9 +13,9 @@ app.use((req, res, next) => {
 
 const MANIFEST = {
   id: 'org.nguonc.stremio.addon',
-  version: '1.4.0',
-  name: 'Phim Vietsub HD (Cleaned)',
-  description: 'Addon xem phim Vietsub tốc độ cao, khử quảng cáo triệt để cho Stremio',
+  version: '1.5.0',
+  name: 'Phim Vietsub HD Direct',
+  description: 'Addon xem phim Vietsub tốc độ cao cho Stremio',
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
   catalogs: [
@@ -51,82 +51,7 @@ async function fetchWithTimeout(url, timeoutMs = 4000) {
 // 1. Manifest
 app.get('/manifest.json', (req, res) => res.json(MANIFEST));
 
-// 2. Route M3U8 Cleaner thông minh (Xử lý cả Master & Sub Playlists)
-app.get('/m3u8-clean', async (req, res) => {
-  const targetUrl = req.query.url;
-  if (!targetUrl) return res.status(400).send('Missing url parameter');
-
-  try {
-    const decodedUrl = decodeURIComponent(targetUrl);
-    const originUrl = new URL(decodedUrl).origin;
-
-    const response = await fetch(decodedUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-        'Referer': originUrl + '/'
-      }
-    });
-
-    if (!response.ok) return res.status(response.status).send('Error fetching M3U8');
-
-    const body = await response.text();
-    const baseUrl = decodedUrl.substring(0, decodedUrl.lastIndexOf('/') + 1);
-    const lines = body.split('\n');
-    const cleanedLines = [];
-
-    const host = req.get('host');
-    const protocol = req.headers['x-forwarded-proto'] || 'https';
-
-    for (let i = 0; i < lines.length; i++) {
-      let line = lines[i].trim();
-      if (!line) continue;
-
-      // Bỏ qua tag ngắt gián đoạn quảng cáo
-      if (line.startsWith('#EXT-X-DISCONTINUITY')) {
-        continue;
-      }
-
-      // Phát hiện và lọc các thẻ phân đoạn quảng cáo #EXTINF
-      if (line.startsWith('#EXTINF:')) {
-        const nextLine = lines[i + 1] ? lines[i + 1].trim() : '';
-        const isAd = line.includes('ads') || line.includes('qc') || line.includes('9922') || line.includes('bet') ||
-                     nextLine.includes('ads') || nextLine.includes('qc') || nextLine.includes('9922') || nextLine.includes('bet');
-
-        if (isAd) {
-          i++; // Nhảy qua URL của quảng cáo
-          continue;
-        }
-      }
-
-      // Xử lý các đường dẫn (URLs)
-      if (!line.startsWith('#')) {
-        // Chuyển relative URL thành absolute URL
-        let fullSegmentUrl = line;
-        if (!line.startsWith('http://') && !line.startsWith('https://')) {
-          fullSegmentUrl = new URL(line, baseUrl).href;
-        }
-
-        // Nếu URL này trỏ đến một file .m3u8 con (Sub-playlist), bọc nó tiếp qua proxy /m3u8-clean
-        if (fullSegmentUrl.includes('.m3u8')) {
-          line = `${protocol}://${host}/m3u8-clean?url=${encodeURIComponent(fullSegmentUrl)}`;
-        } else {
-          line = fullSegmentUrl;
-        }
-      }
-
-      cleanedLines.push(line);
-    }
-
-    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.status(200).send(cleanedLines.join('\n'));
-  } catch (err) {
-    res.status(500).send('Proxy filter error');
-  }
-});
-
-// 3. Catalog
+// 2. Catalog
 app.get('/catalog/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
   const fullUrl = req.originalUrl || req.url;
@@ -211,7 +136,7 @@ app.get('/catalog/:type/:id*', async (req, res) => {
   res.json({ metas });
 });
 
-// 4. Meta
+// 3. Meta
 app.get('/meta/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
   const cleanId = id.replace('.json', '');
@@ -268,7 +193,7 @@ app.get('/meta/:type/:id*', async (req, res) => {
   });
 });
 
-// 5. Stream Endpoint
+// 4. Stream Endpoint Direct Stream
 app.get('/stream/:type/:id*', async (req, res) => {
   const { id } = req.params;
   const cleanId = id.replace('.json', '');
@@ -282,44 +207,30 @@ app.get('/stream/:type/:id*', async (req, res) => {
   ]);
 
   const streams = [];
-  const host = req.get('host');
-  const protocol = req.headers['x-forwarded-proto'] || 'https';
 
-  const processEpisodes = (episodes, sourceName) => {
+  const processEpisodes = (episodes, sourceName, defaultReferer) => {
     if (!Array.isArray(episodes)) return;
     episodes.forEach((server, sIdx) => {
       const serverData = server.server_data || [];
       const ep = serverData.find((e, idx) => epSlug ? (e.slug === epSlug || idx.toString() === epSlug) : true);
       
       if (ep && ep.link_m3u8) {
-        const cleanProxyUrl = `${protocol}://${host}/m3u8-clean?url=${encodeURIComponent(ep.link_m3u8)}`;
-        streams.push({
-          name: `[${sourceName} - VIP Clean]`,
-          title: `${server.server_name || 'Server ' + (sIdx + 1)} - Lọc QC - ${ep.name}`,
-          type: 'hls',
-          url: cleanProxyUrl,
-          behaviorHints: {
-            notSupported: false,
-            proxyHeaders: {
-              request: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                'Referer': new URL(ep.link_m3u8).origin + '/'
-              }
-            }
-          }
-        });
+        let refererHeader = defaultReferer;
+        try {
+          refererHeader = new URL(ep.link_m3u8).origin + '/';
+        } catch (e) {}
 
         streams.push({
-          name: `[${sourceName} - Gốc]`,
-          title: `${server.server_name || 'Server ' + (sIdx + 1)} - Link Gốc - ${ep.name}`,
+          name: `[${sourceName}]`,
+          title: `${server.server_name || 'Server ' + (sIdx + 1)} - ${ep.name}`,
           type: 'hls',
           url: ep.link_m3u8,
           behaviorHints: {
             notSupported: false,
             proxyHeaders: {
               request: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                'Referer': new URL(ep.link_m3u8).origin + '/'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': refererHeader
               }
             }
           }
@@ -328,8 +239,8 @@ app.get('/stream/:type/:id*', async (req, res) => {
     });
   };
 
-  processEpisodes(dataKK?.episodes || dataKK?.movie?.episodes, 'PhimAPI');
-  processEpisodes(dataNC?.episodes || dataNC?.movie?.episodes, 'NguonC');
+  processEpisodes(dataKK?.episodes || dataKK?.movie?.episodes, 'PhimAPI', 'https://phimapi.com/');
+  processEpisodes(dataNC?.episodes || dataNC?.movie?.episodes, 'NguonC', 'https://phim.nguonc.com/');
 
   res.json({ streams });
 });
