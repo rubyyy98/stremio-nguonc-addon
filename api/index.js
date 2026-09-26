@@ -8,14 +8,15 @@ app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
 
 const MANIFEST = {
   id: 'org.nguonc.stremio.addon',
-  version: '1.6.0',
-  name: 'Phim Vietsub HD Clean',
-  description: 'Addon xem phim Vietsub tốc độ cao, bóc tách quảng cáo triệt để',
+  version: '1.7.0',
+  name: 'Phim Vietsub HD VIP',
+  description: 'Addon xem phim Vietsub mượt mà, lọc QC không giật lag',
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
   catalogs: [
@@ -31,13 +32,13 @@ const MANIFEST = {
   ]
 };
 
-async function fetchWithTimeout(url, timeoutMs = 4000) {
+async function fetchWithTimeout(url, timeoutMs = 5000) {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const res = await fetch(url, {
       method: 'GET',
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
       signal: controller.signal
     });
     clearTimeout(timer);
@@ -48,10 +49,10 @@ async function fetchWithTimeout(url, timeoutMs = 4000) {
   return null;
 }
 
-// 1. Manifest
+// 1. Manifest Endpoint
 app.get('/manifest.json', (req, res) => res.json(MANIFEST));
 
-// 2. Route lọc Quảng Cáo M3U8 siêu tốc (Loại bỏ QC, giữ nguyên đường dẫn phân đoạn video gốc)
+// 2. Route xử lý M3U8 Siêu Tốc (Khử QC + Chuẩn hóa URL cho Stremio)
 app.get('/m3u8-clean', async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) return res.status(400).send('Missing url parameter');
@@ -82,34 +83,39 @@ app.get('/m3u8-clean', async (req, res) => {
       let line = lines[i].trim();
       if (!line) continue;
 
-      // Xóa các thẻ ngắt quãng không cần thiết
+      // Xóa thẻ discontinuity gây xé hình hoặc treo player
       if (line.startsWith('#EXT-X-DISCONTINUITY')) {
         continue;
       }
 
-      // Phát hiện phân đoạn QC
+      // Nhận diện và lọc bỏ phân đoạn chứa QC
       if (line.startsWith('#EXTINF:')) {
         const nextLine = lines[i + 1] ? lines[i + 1].trim() : '';
-        const isAd = line.includes('ads') || line.includes('qc') || line.includes('9922') || line.includes('bet') || line.includes('intro') ||
-                     nextLine.includes('ads') || nextLine.includes('qc') || nextLine.includes('9922') || nextLine.includes('bet') || nextLine.includes('intro');
+        const isAd = line.toLowerCase().includes('ad') || line.includes('9922') || line.includes('bet') ||
+                     nextLine.toLowerCase().includes('ad') || nextLine.includes('9922') || nextLine.includes('bet');
 
         if (isAd) {
-          i++; // Bỏ qua dòng link QC kế tiếp
+          i++; // Bỏ qua phân đoạn video QC
           continue;
         }
       }
 
-      // Chuyển relative link thành Absolute URL
+      // Xử lý các đường dẫn truyền vào
       if (!line.startsWith('#')) {
         let fullUrl = line;
         if (!line.startsWith('http://') && !line.startsWith('https://')) {
-          fullUrl = new URL(line, baseUrl).href;
+          try {
+            fullUrl = new URL(line, baseUrl).href;
+          } catch (e) {
+            fullUrl = line;
+          }
         }
 
-        // Nếu là sub-playlist .m3u8 thì bọc tiếp qua route /m3u8-clean, nếu là file .ts thì giữ nguyên Absolute URL
+        // Nếu chuỗi tiếp theo là 1 playlist m3u8 con -> Tiếp tục proxy qua /m3u8-clean
         if (fullUrl.includes('.m3u8')) {
           line = `${protocol}://${host}/m3u8-clean?url=${encodeURIComponent(fullUrl)}`;
         } else {
+          // Nếu là file video segment (.ts) -> Trỏ thẳng về CDN gốc để Stremio tự load
           line = fullUrl;
         }
       }
@@ -117,12 +123,12 @@ app.get('/m3u8-clean', async (req, res) => {
       cleanedLines.push(line);
     }
 
-    res.setHeader('Content-Type', 'application/x-mpegURL');
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Cache-Control', 'max-age=3600, public');
-    res.status(200).send(cleanedLines.join('\n'));
+    res.setHeader('Cache-Control', 's-maxage=1800, max-age=3600, stale-while-revalidate');
+    return res.status(200).send(cleanedLines.join('\n'));
   } catch (err) {
-    res.status(500).send('Filter error');
+    return res.status(500).send('Error processing M3U8 stream');
   }
 });
 
@@ -268,7 +274,7 @@ app.get('/meta/:type/:id*', async (req, res) => {
   });
 });
 
-// 5. Stream Endpoint (Hỗ trợ cả Server Clean & Server Gốc)
+// 5. Stream Endpoint
 app.get('/stream/:type/:id*', async (req, res) => {
   const { id } = req.params;
   const cleanId = id.replace('.json', '');
@@ -299,11 +305,10 @@ app.get('/stream/:type/:id*', async (req, res) => {
 
         const cleanProxyUrl = `${protocol}://${host}/m3u8-clean?url=${encodeURIComponent(ep.link_m3u8)}`;
 
-        // Option 1: Server VIP Sạch Quảng Cáo
+        // Server Clean: Tốc độ cao, lọc QC
         streams.push({
-          name: `[${sourceName} VIP]`,
-          title: `Lọc QC (Khuyên Dùng) - ${server.server_name || 'Server ' + (sIdx + 1)} - ${ep.name}`,
-          type: 'hls',
+          name: `[${sourceName} Clean]`,
+          title: `Lọc QC - ${server.server_name || 'Server ' + (sIdx + 1)} - ${ep.name}`,
           url: cleanProxyUrl,
           behaviorHints: {
             notSupported: false,
@@ -316,11 +321,10 @@ app.get('/stream/:type/:id*', async (req, res) => {
           }
         });
 
-        // Option 2: Server Gốc
+        // Server Direct: Link phát trực tiếp gốc
         streams.push({
-          name: `[${sourceName} Gốc]`,
-          title: `Link Gốc - ${server.server_name || 'Server ' + (sIdx + 1)} - ${ep.name}`,
-          type: 'hls',
+          name: `[${sourceName} Direct]`,
+          title: `Gốc - ${server.server_name || 'Server ' + (sIdx + 1)} - ${ep.name}`,
           url: ep.link_m3u8,
           behaviorHints: {
             notSupported: false,
