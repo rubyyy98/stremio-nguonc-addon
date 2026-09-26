@@ -13,9 +13,9 @@ app.use((req, res, next) => {
 
 const MANIFEST = {
   id: 'org.nguonc.stremio.addon',
-  version: '1.1.2',
-  name: 'Phim Vietsub HD (Lọc QC)',
-  description: 'Addon xem phim Vietsub tốc độ cao, hỗ trợ lọc quảng cáo dynamic HLS cho Stremio',
+  version: '1.2.0',
+  name: 'Phim Vietsub HD',
+  description: 'Addon xem phim Vietsub tốc độ cao cho Stremio',
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
   catalogs: [
@@ -48,72 +48,10 @@ async function fetchWithTimeout(url, timeoutMs = 4000) {
   return null;
 }
 
-// Route M3U8 Cleaner Proxy
-app.get('/m3u8-clean', async (req, res) => {
-  const targetUrl = req.query.url;
-  if (!targetUrl) return res.status(400).send('Missing url');
-
-  try {
-    const decodedUrl = decodeURIComponent(targetUrl);
-    const response = await fetch(decodedUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-        'Referer': new URL(decodedUrl).origin
-      }
-    });
-
-    if (!response.ok) return res.status(response.status).send('Error fetching target m3u8');
-
-    const body = await response.text();
-    const baseUrl = decodedUrl.substring(0, decodedUrl.lastIndexOf('/') + 1);
-
-    const lines = body.split('\n');
-    const cleanedLines = [];
-    let skipNextLine = false;
-
-    for (let i = 0; i < lines.length; i++) {
-      let line = lines[i].trim();
-
-      // Bỏ qua tag ngắt nhịp quảng cáo
-      if (line.startsWith('#EXT-X-DISCONTINUITY')) {
-        continue;
-      }
-
-      // Lọc các tag hoặc link chứa từ khóa quảng cáo
-      if (line.includes('ads') || line.includes('qc') || line.includes('intro') || line.includes('9922') || line.includes('bet')) {
-        continue;
-      }
-
-      if (line.startsWith('#EXTINF:')) {
-        const nextLine = lines[i + 1] ? lines[i + 1].trim() : '';
-        if (nextLine.includes('ads') || nextLine.includes('qc') || nextLine.includes('9922') || nextLine.includes('bet')) {
-          i++; // Nhảy qua cả dòng URL quảng cáo kế tiếp
-          continue;
-        }
-      }
-
-      // Chuyển relative path thành full HTTPS URL
-      if (!line.startsWith('#') && line.length > 0) {
-        if (!line.startsWith('http://') && !line.startsWith('https://')) {
-          line = new URL(line, baseUrl).href;
-        }
-      }
-
-      cleanedLines.push(line);
-    }
-
-    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.status(200).send(cleanedLines.join('\n'));
-  } catch (err) {
-    res.status(500).send('Proxy filter error');
-  }
-});
-
-// Stremio Endpoints
+// 1. Manifest
 app.get('/manifest.json', (req, res) => res.json(MANIFEST));
 
+// 2. Catalog
 app.get('/catalog/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
   const fullUrl = req.originalUrl || req.url;
@@ -146,10 +84,10 @@ app.get('/catalog/:type/:id*', async (req, res) => {
       nguoncUrl = `https://phim.nguonc.com/api/films/quoc-gia/trung-quoc?page=${page}`;
     } else if (id.includes('han_quoc')) {
       kkUrl = `https://phimapi.com/v1/api/quoc-gia/han-quoc?page=${page}`;
-      nguoncUrl = `https://phim.nguonc.com/api/films/quoc-gia/han-quoc?page=${page}`;
+      nguoncUrl = `https://phim.nguonc.com/api/films/han-quoc?page=${page}`;
     } else if (id.includes('au_my')) {
       kkUrl = `https://phimapi.com/v1/api/quoc-gia/au-my?page=${page}`;
-      nguoncUrl = `https://phim.nguonc.com/api/films/quoc-gia/au-my?page=${page}`;
+      nguoncUrl = `https://phim.nguonc.com/api/films/au-my?page=${page}`;
     } else if (id.includes('hoat_hinh')) {
       kkUrl = `https://phimapi.com/v1/api/danh-sach/hoat-hinh?page=${page}`;
       nguoncUrl = `https://phim.nguonc.com/api/films/danh-sach/hoat-hinh?page=${page}`;
@@ -160,15 +98,27 @@ app.get('/catalog/:type/:id*', async (req, res) => {
     }
   }
 
-  const dataKK = await fetchWithTimeout(kkUrl);
-  let items = dataKK?.data?.items || [];
+  const [dataKK, dataNguonc] = await Promise.all([
+    fetchWithTimeout(kkUrl),
+    fetchWithTimeout(nguoncUrl)
+  ]);
+
+  const itemsKK = dataKK?.data?.items || [];
+  const itemsNC = dataNguonc?.items || dataNguonc?.data?.items || [];
+  
+  // Merge kết quả từ cả 2 nguồn để đảm bảo đầy đủ phim
+  const combined = [...itemsKK, ...itemsNC];
+  const uniqueMap = new Map();
+
+  combined.forEach(item => {
+    if (item && item.slug && !uniqueMap.has(item.slug)) {
+      uniqueMap.set(item.slug, item);
+    }
+  });
+
+  const items = Array.from(uniqueMap.values());
 
   if (!items.length) {
-    const dataNguonc = await fetchWithTimeout(nguoncUrl);
-    items = dataNguonc?.items || dataNguonc?.data?.items || [];
-  }
-
-  if (!Array.isArray(items) || !items.length) {
     return res.json({ metas: [] });
   }
 
@@ -191,15 +141,18 @@ app.get('/catalog/:type/:id*', async (req, res) => {
   res.json({ metas });
 });
 
+// 3. Meta
 app.get('/meta/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
   const cleanId = id.replace('.json', '');
   const slug = cleanId.replace('phim:', '').replace('nguonc:', '');
 
-  const data = await fetchWithTimeout(`https://phimapi.com/phim/${slug}`) || 
-               await fetchWithTimeout(`https://phim.nguonc.com/api/film/${slug}`);
+  const [dataKK, dataNC] = await Promise.all([
+    fetchWithTimeout(`https://phimapi.com/phim/${slug}`),
+    fetchWithTimeout(`https://phim.nguonc.com/api/film/${slug}`)
+  ]);
 
-  const movie = data?.movie || data?.data?.movie;
+  const movie = dataKK?.movie || dataNC?.movie || dataNC?.data?.movie;
   if (!movie) return res.json({ meta: {} });
 
   let posterUrl = movie.poster_url || movie.thumb_url || '';
@@ -208,20 +161,25 @@ app.get('/meta/:type/:id*', async (req, res) => {
   }
 
   const videos = [];
-  const episodes = movie.episodes || data?.episodes || [];
+  const episodesKK = dataKK?.episodes || movie?.episodes || [];
+  const episodesNC = dataNC?.episodes || [];
+  
+  const allEpisodes = [...episodesKK, ...episodesNC];
 
-  if (Array.isArray(episodes)) {
-    episodes.forEach(server => {
+  if (Array.isArray(allEpisodes)) {
+    allEpisodes.forEach(server => {
       const serverData = server.server_data || [];
       if (Array.isArray(serverData)) {
         serverData.forEach((ep, index) => {
-          videos.push({
-            id: `stream:${slug}:${ep.slug || index}`,
-            title: ep.name || `Tập ${index + 1}`,
-            season: 1,
-            episode: index + 1,
-            released: new Date().toISOString()
-          });
+          if (!videos.some(v => v.episode === index + 1)) {
+            videos.push({
+              id: `stream:${slug}:${ep.slug || index}`,
+              title: ep.name || `Tập ${index + 1}`,
+              season: 1,
+              episode: index + 1,
+              released: new Date().toISOString()
+            });
+          }
         });
       }
     });
@@ -241,6 +199,7 @@ app.get('/meta/:type/:id*', async (req, res) => {
   });
 });
 
+// 4. Stream Endpoint (Trả về link kèm Headers tối ưu cho Stremio)
 app.get('/stream/:type/:id*', async (req, res) => {
   const { id } = req.params;
   const cleanId = id.replace('.json', '');
@@ -248,38 +207,61 @@ app.get('/stream/:type/:id*', async (req, res) => {
   const slug = parts[0];
   const epSlug = parts[1];
 
-  const data = await fetchWithTimeout(`https://phimapi.com/phim/${slug}`) || 
-               await fetchWithTimeout(`https://phim.nguonc.com/api/film/${slug}`);
+  const [dataKK, dataNC] = await Promise.all([
+    fetchWithTimeout(`https://phimapi.com/phim/${slug}`),
+    fetchWithTimeout(`https://phim.nguonc.com/api/film/${slug}`)
+  ]);
 
-  const movie = data?.movie || data?.data?.movie;
-  const episodes = data?.episodes || movie?.episodes || [];
   const streams = [];
 
-  const host = req.get('host');
-  const protocol = req.headers['x-forwarded-proto'] || 'https';
-
-  if (Array.isArray(episodes)) {
-    episodes.forEach(server => {
+  // Lấy danh sách server từ PhimAPI
+  const episodesKK = dataKK?.episodes || dataKK?.movie?.episodes || [];
+  if (Array.isArray(episodesKK)) {
+    episodesKK.forEach((server, sIdx) => {
       const serverData = server.server_data || [];
-      if (Array.isArray(serverData)) {
-        const ep = serverData.find((e, idx) => epSlug ? (e.slug === epSlug || idx.toString() === epSlug) : true);
-        
-        if (ep && ep.link_m3u8) {
-          const cleanProxyUrl = `${protocol}://${host}/m3u8-clean?url=${encodeURIComponent(ep.link_m3u8)}`;
-          streams.push({
-            name: `[VIP Clean]`,
-            title: `Phim Vietsub (Lọc QC - Smooth Seek) - ${ep.name}`,
-            type: 'hls',
-            url: cleanProxyUrl
-          });
+      const ep = serverData.find((e, idx) => epSlug ? (e.slug === epSlug || idx.toString() === epSlug) : true);
+      if (ep && ep.link_m3u8) {
+        streams.push({
+          name: `[Server PhimAPI]`,
+          title: `${server.server_name || 'Server ' + (sIdx + 1)} - ${ep.name}`,
+          type: 'hls',
+          url: ep.link_m3u8,
+          behaviorHints: {
+            notSupported: false,
+            proxyHeaders: {
+              request: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                'Referer': 'https://phimapi.com/'
+              }
+            }
+          }
+        });
+      }
+    });
+  }
 
-          streams.push({
-            name: `[Gốc Direct]`,
-            title: `Nguồn Gốc Server - ${ep.name}`,
-            type: 'hls',
-            url: ep.link_m3u8
-          });
-        }
+  // Lấy danh sách server từ NguonC
+  const episodesNC = dataNC?.episodes || dataNC?.movie?.episodes || [];
+  if (Array.isArray(episodesNC)) {
+    episodesNC.forEach((server, sIdx) => {
+      const serverData = server.server_data || [];
+      const ep = serverData.find((e, idx) => epSlug ? (e.slug === epSlug || idx.toString() === epSlug) : true);
+      if (ep && ep.link_m3u8) {
+        streams.push({
+          name: `[Server NguonC]`,
+          title: `${server.server_name || 'Server ' + (sIdx + 1)} - ${ep.name}`,
+          type: 'hls',
+          url: ep.link_m3u8,
+          behaviorHints: {
+            notSupported: false,
+            proxyHeaders: {
+              request: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                'Referer': 'https://phim.nguonc.com/'
+              }
+            }
+          }
+        });
       }
     });
   }
