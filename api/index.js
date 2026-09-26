@@ -13,9 +13,9 @@ app.use((req, res, next) => {
 
 const MANIFEST = {
   id: 'org.nguonc.stremio.addon',
-  version: '1.0.3',
+  version: '1.0.4',
   name: 'Phim Vietsub HD',
-  description: 'Addon xem phim Vietsub Chặn Quảng Cáo tốc độ cao cho Stremio',
+  description: 'Addon xem phim Vietsub tốc độ cao, không giật lag cho Stremio',
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
   catalogs: [
@@ -78,7 +78,7 @@ const MANIFEST = {
   ]
 };
 
-// Fetch dữ liệu với Timeout
+// Fetch cơ bản với Timeout
 async function fetchWithTimeout(url, timeoutMs = 3500) {
   try {
     const controller = new AbortController();
@@ -99,7 +99,7 @@ async function fetchWithTimeout(url, timeoutMs = 3500) {
 // 1. Manifest Endpoint
 app.get('/manifest.json', (req, res) => res.json(MANIFEST));
 
-// 2. Catalog Endpoint (Hỗ trợ phân trang skip & lọc theo quốc gia)
+// 2. Catalog Endpoint (Hỗ trợ phân trang & lọc theo quốc gia)
 app.get('/catalog/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
   const fullUrl = req.originalUrl || req.url;
@@ -228,68 +228,9 @@ app.get('/meta/:type/:id*', async (req, res) => {
   });
 });
 
-// 4. Proxy M3U8 Filter Endpoint (Xử lý và lọc bỏ phân đoạn quảng cáo)
-app.get('/proxy-m3u8', async (req, res) => {
-  const targetUrl = req.query.url;
-  if (!targetUrl) return res.status(400).send('Missing URL');
-
-  try {
-    const response = await fetch(targetUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
-    });
-    
-    if (!response.ok) return res.status(500).send('Error fetching M3U8');
-
-    let m3u8Content = await response.text();
-    const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
-
-    // Danh sách từ khoá nhận diện quảng cáo chèn trong luồng
-    const adKeywords = ['ads', 'advertisement', 'qc', 'promo', 'intro', 'bet', 'casino', '88'];
-
-    const lines = m3u8Content.split('\n');
-    const filteredLines = [];
-    let skipNextLine = false;
-
-    for (let i = 0; i < lines.length; i++) {
-      let line = lines[i].trim();
-
-      const isAd = adKeywords.some(kw => line.toLowerCase().includes(kw));
-
-      if (isAd) {
-        if (line.startsWith('#EXTINF')) {
-          skipNextLine = true;
-        }
-        continue;
-      }
-
-      if (skipNextLine) {
-        skipNextLine = false;
-        continue;
-      }
-
-      // Chuẩn hóa Relative URL thành Absolute URL
-      if (line.length > 0 && !line.startsWith('#') && !line.startsWith('http')) {
-        line = baseUrl + line;
-      }
-
-      filteredLines.push(line);
-    }
-
-    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.send(filteredLines.join('\n'));
-  } catch (err) {
-    res.redirect(targetUrl);
-  }
-});
-
-// 5. Stream Endpoint (Tích hợp Proxy Chặn QC)
+// 4. Stream Endpoint (Direct Stream mượt mà)
 app.get('/stream/:type/:id*', async (req, res) => {
   const { id } = req.params;
-  const host = req.headers.host;
-  const protocol = req.headers['x-forwarded-proto'] || 'https';
-  const baseUrl = `${protocol}://${host}`;
-
   const cleanId = id.replace('.json', '');
   const parts = cleanId.replace('stream:', '').split(':');
   const slug = parts[0];
@@ -308,21 +249,10 @@ app.get('/stream/:type/:id*', async (req, res) => {
       if (Array.isArray(serverData)) {
         const ep = serverData.find((e, idx) => epSlug ? (e.slug === epSlug || idx.toString() === epSlug) : true);
         
-        if (ep && ep.link_m3u8 && ep.link_m3u8.includes('.m3u8')) {
-          const cleanStreamUrl = `${baseUrl}/proxy-m3u8?url=${encodeURIComponent(ep.link_m3u8)}`;
-
-          // Luồng No-Ads đã qua xử lý
+        if (ep && ep.link_m3u8) {
           streams.push({
-            name: `[No-Ads] ${server.server_name || 'VIP'}`,
-            title: `Server Sạch Quảng Cáo - ${ep.name}`,
-            type: 'hls',
-            url: cleanStreamUrl
-          });
-
-          // Luồng gốc làm dự phòng
-          streams.push({
-            name: `[Gốc] ${server.server_name || 'Gốc'}`,
-            title: `Server Gốc (Dự Phòng) - ${ep.name}`,
+            name: `[VIP] ${server.server_name || 'HLS'}`,
+            title: `Server Tốc Độ Cao - ${ep.name}`,
             type: 'hls',
             url: ep.link_m3u8
           });
