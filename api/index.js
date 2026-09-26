@@ -13,7 +13,7 @@ app.use((req, res, next) => {
 
 const MANIFEST = {
   id: 'org.nguonc.stremio.addon',
-  version: '1.0.6',
+  version: '1.0.7',
   name: 'Phim Vietsub HD',
   description: 'Addon xem phim Vietsub tốc độ cao cho Stremio',
   resources: ['catalog', 'meta', 'stream'],
@@ -188,28 +188,40 @@ app.get('/stream/:type/:id*', async (req, res) => {
   const slug = parts[0];
   const epSlug = parts[1];
 
-  const data = await fetchWithTimeout(`https://phimapi.com/phim/${slug}`) || 
-               await fetchWithTimeout(`https://phim.nguonc.com/api/film/${slug}`);
+  const [dataKK, dataNC] = await Promise.all([
+    fetchWithTimeout(`https://phimapi.com/phim/${slug}`),
+    fetchWithTimeout(`https://phim.nguonc.com/api/film/${slug}`)
+  ]);
 
-  const movie = data?.movie || data?.data?.movie;
-  const episodes = data?.episodes || movie?.episodes || [];
   const streams = [];
 
-  if (Array.isArray(episodes)) {
-    episodes.forEach(server => {
-      const serverData = server.server_data || [];
-      if (Array.isArray(serverData)) {
-        const ep = serverData.find((e, idx) => epSlug ? (e.slug === epSlug || idx.toString() === epSlug) : true);
-        
-        if (ep && ep.link_m3u8) {
-          // Server Tốc Độ Cao (Direct Link - Luôn phát ngay lập tức không bị đơ)
-          streams.push({
-            name: `[VIP] ${server.server_name || 'HLS'}`,
-            title: `Server Tốc Độ Cao - ${ep.name}`,
-            type: 'hls',
-            url: ep.link_m3u8
-          });
-        }
+  // Lấy nguồn từ PhimAPI
+  if (dataKK?.episodes) {
+    dataKK.episodes.forEach(server => {
+      const ep = server.server_data?.find((e, idx) => epSlug ? (e.slug === epSlug || idx.toString() === epSlug) : true);
+      if (ep?.link_m3u8) {
+        streams.push({
+          name: `[Server 1] ${server.server_name || 'Vietsub'}`,
+          title: `PhimAPI - ${ep.name}`,
+          type: 'hls',
+          url: ep.link_m3u8
+        });
+      }
+    });
+  }
+
+  // Lấy nguồn dự phòng từ NguồnC
+  if (dataNC?.episodes || dataNC?.movie?.episodes) {
+    const episodesNC = dataNC.episodes || dataNC.movie.episodes;
+    episodesNC.forEach(server => {
+      const ep = server.server_data?.find((e, idx) => epSlug ? (e.slug === epSlug || idx.toString() === epSlug) : true);
+      if (ep?.link_m3u8) {
+        streams.push({
+          name: `[Server 2] ${server.server_name || 'Backup'}`,
+          title: `NguonC - ${ep.name}`,
+          type: 'hls',
+          url: ep.link_m3u8
+        });
       }
     });
   }
