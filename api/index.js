@@ -13,7 +13,7 @@ app.use((req, res, next) => {
 
 const MANIFEST = {
   id: 'org.nguonc.stremio.addon',
-  version: '1.1.0',
+  version: '1.1.2',
   name: 'Phim Vietsub HD (Lọc QC)',
   description: 'Addon xem phim Vietsub tốc độ cao, hỗ trợ lọc quảng cáo dynamic HLS cho Stremio',
   resources: ['catalog', 'meta', 'stream'],
@@ -48,10 +48,72 @@ async function fetchWithTimeout(url, timeoutMs = 4000) {
   return null;
 }
 
-// 1. Manifest
+// Route M3U8 Cleaner Proxy
+app.get('/m3u8-clean', async (req, res) => {
+  const targetUrl = req.query.url;
+  if (!targetUrl) return res.status(400).send('Missing url');
+
+  try {
+    const decodedUrl = decodeURIComponent(targetUrl);
+    const response = await fetch(decodedUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'Referer': new URL(decodedUrl).origin
+      }
+    });
+
+    if (!response.ok) return res.status(response.status).send('Error fetching target m3u8');
+
+    const body = await response.text();
+    const baseUrl = decodedUrl.substring(0, decodedUrl.lastIndexOf('/') + 1);
+
+    const lines = body.split('\n');
+    const cleanedLines = [];
+    let skipNextLine = false;
+
+    for (let i = 0; i < lines.length; i++) {
+      let line = lines[i].trim();
+
+      // Bỏ qua tag ngắt nhịp quảng cáo
+      if (line.startsWith('#EXT-X-DISCONTINUITY')) {
+        continue;
+      }
+
+      // Lọc các tag hoặc link chứa từ khóa quảng cáo
+      if (line.includes('ads') || line.includes('qc') || line.includes('intro') || line.includes('9922') || line.includes('bet')) {
+        continue;
+      }
+
+      if (line.startsWith('#EXTINF:')) {
+        const nextLine = lines[i + 1] ? lines[i + 1].trim() : '';
+        if (nextLine.includes('ads') || nextLine.includes('qc') || nextLine.includes('9922') || nextLine.includes('bet')) {
+          i++; // Nhảy qua cả dòng URL quảng cáo kế tiếp
+          continue;
+        }
+      }
+
+      // Chuyển relative path thành full HTTPS URL
+      if (!line.startsWith('#') && line.length > 0) {
+        if (!line.startsWith('http://') && !line.startsWith('https://')) {
+          line = new URL(line, baseUrl).href;
+        }
+      }
+
+      cleanedLines.push(line);
+    }
+
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.status(200).send(cleanedLines.join('\n'));
+  } catch (err) {
+    res.status(500).send('Proxy filter error');
+  }
+});
+
+// Stremio Endpoints
 app.get('/manifest.json', (req, res) => res.json(MANIFEST));
 
-// 2. Catalog
 app.get('/catalog/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
   const fullUrl = req.originalUrl || req.url;
@@ -129,7 +191,6 @@ app.get('/catalog/:type/:id*', async (req, res) => {
   res.json({ metas });
 });
 
-// 3. Meta
 app.get('/meta/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
   const cleanId = id.replace('.json', '');
@@ -180,7 +241,6 @@ app.get('/meta/:type/:id*', async (req, res) => {
   });
 });
 
-// 4. Stream Endpoint
 app.get('/stream/:type/:id*', async (req, res) => {
   const { id } = req.params;
   const cleanId = id.replace('.json', '');
@@ -196,7 +256,7 @@ app.get('/stream/:type/:id*', async (req, res) => {
   const streams = [];
 
   const host = req.get('host');
-  const protocol = req.protocol || 'https';
+  const protocol = req.headers['x-forwarded-proto'] || 'https';
 
   if (Array.isArray(episodes)) {
     episodes.forEach(server => {
@@ -205,7 +265,6 @@ app.get('/stream/:type/:id*', async (req, res) => {
         const ep = serverData.find((e, idx) => epSlug ? (e.slug === epSlug || idx.toString() === epSlug) : true);
         
         if (ep && ep.link_m3u8) {
-          // Server 1: Clean Stream (Lọc QC + Khắc phục lỗi tua về 0:00)
           const cleanProxyUrl = `${protocol}://${host}/m3u8-clean?url=${encodeURIComponent(ep.link_m3u8)}`;
           streams.push({
             name: `[VIP Clean]`,
@@ -214,7 +273,6 @@ app.get('/stream/:type/:id*', async (req, res) => {
             url: cleanProxyUrl
           });
 
-          // Server 2: Link Trực Tiếp Gốc (Backup)
           streams.push({
             name: `[Gốc Direct]`,
             title: `Nguồn Gốc Server - ${ep.name}`,
@@ -229,75 +287,6 @@ app.get('/stream/:type/:id*', async (req, res) => {
   res.json({ streams });
 });
 
-// 5. Proxy M3U8 Filter Engine (Xóa QC Dynamic & Chuẩn hóa Timeline)
-app.get('/m3u8-clean', async (req, res) => {
-  const targetUrl = req.query.url;
-  if (!targetUrl) return res.status(400).send('Missing url');
-
-  try {
-    const response = await fetch(targetUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-        'Referer': new URL(targetUrl).origin
-      }
-    });
-
-    if (!response.ok) return res.status(response.status).send('Error fetching target m3u8');
-
-    const body = await response.text();
-    const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
-
-    const lines = body.split('\n');
-    const cleanedLines = [];
-    let isAdSegment = false;
-
-    for (let i = 0; i < lines.length; i++) {
-      let line = lines[i].trim();
-
-      // Bỏ qua thẻ discontinuity chèn ngắt quãng timeline quảng cáo
-      if (line.startsWith('#EXT-X-DISCONTINUITY')) {
-        continue;
-      }
-
-      // Nhận diện phân đoạn quảng cáo chèn ngoài (chứa domain QC hoặc chuỗi lạ)
-      if (line.includes('ads') || line.includes('qc') || line.includes('intro') || line.includes('9922') || line.includes('bet')) {
-        isAdSegment = true;
-        continue;
-      }
-
-      if (line.startsWith('#EXTINF:')) {
-        // Kiểm tra nếu dòng tiếp theo là link quảng cáo
-        const nextLine = lines[i + 1] ? lines[i + 1].trim() : '';
-        if (nextLine.includes('ads') || nextLine.includes('qc') || nextLine.includes('9922') || nextLine.includes('bet')) {
-          isAdSegment = true;
-          continue;
-        }
-        isAdSegment = false;
-      }
-
-      if (isAdSegment) {
-        if (!line.startsWith('#')) isAdSegment = false;
-        continue;
-      }
-
-      // Chuyển relative URL thành Absolute URL để Stremio tải được phân đoạn phim chính
-      if (!line.startsWith('#') && line.length > 0) {
-        if (!line.startsWith('http://') && !line.startsWith('https://')) {
-          line = new URL(line, baseUrl).href;
-        }
-      }
-
-      cleanedLines.push(line);
-    }
-
-    res.setHeader('Content-Type', 'application/x-mpegURL');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.send(cleanedLines.join('\n'));
-  } catch (err) {
-    res.status(500).send('Proxy filter error');
-  }
-});
-
-app.get('/', (req, res) => res.redirect('/manifest.json'));
+app.get('*', (req, res) => res.redirect('/manifest.json'));
 
 module.exports = app;
