@@ -8,15 +8,14 @@ app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
   next();
 });
 
 const MANIFEST = {
   id: 'org.nguonc.stremio.addon',
-  version: '1.0.2',
+  version: '1.0.3',
   name: 'Phim Vietsub HD',
-  description: 'Addon xem phim Vietsub phân loại Quốc gia tốc độ cao cho Stremio',
+  description: 'Addon xem phim Vietsub Chặn Quảng Cáo tốc độ cao cho Stremio',
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
   catalogs: [
@@ -79,16 +78,14 @@ const MANIFEST = {
   ]
 };
 
-// Fetch với timeout ngắn (3 giây)
-async function fetchWithTimeout(url, timeoutMs = 3000) {
+// Fetch dữ liệu với Timeout
+async function fetchWithTimeout(url, timeoutMs = 3500) {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const res = await fetch(url, {
       method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      },
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
       signal: controller.signal
     });
     clearTimeout(timer);
@@ -99,10 +96,10 @@ async function fetchWithTimeout(url, timeoutMs = 3000) {
   return null;
 }
 
-// 1. Manifest
+// 1. Manifest Endpoint
 app.get('/manifest.json', (req, res) => res.json(MANIFEST));
 
-// 2. Catalog
+// 2. Catalog Endpoint (Hỗ trợ phân trang skip & lọc theo quốc gia)
 app.get('/catalog/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
   const fullUrl = req.originalUrl || req.url;
@@ -124,15 +121,12 @@ app.get('/catalog/:type/:id*', async (req, res) => {
   }
 
   const page = Math.floor(skip / 24) + 1;
-
-  let kkUrl = '';
-  let nguoncUrl = '';
+  let kkUrl = '', nguoncUrl = '';
 
   if (search) {
     kkUrl = `https://phimapi.com/v1/api/tim-kiem?keyword=${encodeURIComponent(search)}&page=${page}`;
     nguoncUrl = `https://phim.nguonc.com/api/films/search?keyword=${encodeURIComponent(search)}&page=${page}`;
   } else {
-    // Xử lý bộ lọc theo id catalog
     if (id.includes('trung_quoc')) {
       kkUrl = `https://phimapi.com/v1/api/quoc-gia/trung-quoc?page=${page}`;
       nguoncUrl = `https://phim.nguonc.com/api/films/quoc-gia/trung-quoc?page=${page}`;
@@ -147,16 +141,11 @@ app.get('/catalog/:type/:id*', async (req, res) => {
       nguoncUrl = `https://phim.nguonc.com/api/films/danh-sach/hoat-hinh?page=${page}`;
     } else {
       const isSeries = id.includes('series') || type === 'series';
-      kkUrl = isSeries 
-        ? `https://phimapi.com/v1/api/danh-sach/phim-bo?page=${page}` 
-        : `https://phimapi.com/v1/api/danh-sach/phim-le?page=${page}`;
-      nguoncUrl = isSeries 
-        ? `https://phim.nguonc.com/api/films/danh-sach/phim-bo?page=${page}` 
-        : `https://phim.nguonc.com/api/films/danh-sach/phim-le?page=${page}`;
+      kkUrl = isSeries ? `https://phimapi.com/v1/api/danh-sach/phim-bo?page=${page}` : `https://phimapi.com/v1/api/danh-sach/phim-le?page=${page}`;
+      nguoncUrl = isSeries ? `https://phim.nguonc.com/api/films/danh-sach/phim-bo?page=${page}` : `https://phim.nguonc.com/api/films/danh-sach/phim-le?page=${page}`;
     }
   }
 
-  // Gọi API lấy dữ liệu
   const dataKK = await fetchWithTimeout(kkUrl);
   let items = dataKK?.data?.items || [];
 
@@ -188,7 +177,7 @@ app.get('/catalog/:type/:id*', async (req, res) => {
   res.json({ metas });
 });
 
-// 3. Meta
+// 3. Meta Endpoint
 app.get('/meta/:type/:id*', async (req, res) => {
   const { type, id } = req.params;
   const cleanId = id.replace('.json', '');
@@ -239,9 +228,68 @@ app.get('/meta/:type/:id*', async (req, res) => {
   });
 });
 
-// 4. Stream
+// 4. Proxy M3U8 Filter Endpoint (Xử lý và lọc bỏ phân đoạn quảng cáo)
+app.get('/proxy-m3u8', async (req, res) => {
+  const targetUrl = req.query.url;
+  if (!targetUrl) return res.status(400).send('Missing URL');
+
+  try {
+    const response = await fetch(targetUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+    });
+    
+    if (!response.ok) return res.status(500).send('Error fetching M3U8');
+
+    let m3u8Content = await response.text();
+    const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
+
+    // Danh sách từ khoá nhận diện quảng cáo chèn trong luồng
+    const adKeywords = ['ads', 'advertisement', 'qc', 'promo', 'intro', 'bet', 'casino', '88'];
+
+    const lines = m3u8Content.split('\n');
+    const filteredLines = [];
+    let skipNextLine = false;
+
+    for (let i = 0; i < lines.length; i++) {
+      let line = lines[i].trim();
+
+      const isAd = adKeywords.some(kw => line.toLowerCase().includes(kw));
+
+      if (isAd) {
+        if (line.startsWith('#EXTINF')) {
+          skipNextLine = true;
+        }
+        continue;
+      }
+
+      if (skipNextLine) {
+        skipNextLine = false;
+        continue;
+      }
+
+      // Chuẩn hóa Relative URL thành Absolute URL
+      if (line.length > 0 && !line.startsWith('#') && !line.startsWith('http')) {
+        line = baseUrl + line;
+      }
+
+      filteredLines.push(line);
+    }
+
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.send(filteredLines.join('\n'));
+  } catch (err) {
+    res.redirect(targetUrl);
+  }
+});
+
+// 5. Stream Endpoint (Tích hợp Proxy Chặn QC)
 app.get('/stream/:type/:id*', async (req, res) => {
   const { id } = req.params;
+  const host = req.headers.host;
+  const protocol = req.headers['x-forwarded-proto'] || 'https';
+  const baseUrl = `${protocol}://${host}`;
+
   const cleanId = id.replace('.json', '');
   const parts = cleanId.replace('stream:', '').split(':');
   const slug = parts[0];
@@ -259,11 +307,24 @@ app.get('/stream/:type/:id*', async (req, res) => {
       const serverData = server.server_data || [];
       if (Array.isArray(serverData)) {
         const ep = serverData.find((e, idx) => epSlug ? (e.slug === epSlug || idx.toString() === epSlug) : true);
-        if (ep && (ep.link_m3u8 || ep.link_embed)) {
+        
+        if (ep && ep.link_m3u8 && ep.link_m3u8.includes('.m3u8')) {
+          const cleanStreamUrl = `${baseUrl}/proxy-m3u8?url=${encodeURIComponent(ep.link_m3u8)}`;
+
+          // Luồng No-Ads đã qua xử lý
           streams.push({
-            title: `Server [${server.server_name || 'VIP'}] - ${ep.name}`,
+            name: `[No-Ads] ${server.server_name || 'VIP'}`,
+            title: `Server Sạch Quảng Cáo - ${ep.name}`,
             type: 'hls',
-            url: ep.link_m3u8 || ep.link_embed
+            url: cleanStreamUrl
+          });
+
+          // Luồng gốc làm dự phòng
+          streams.push({
+            name: `[Gốc] ${server.server_name || 'Gốc'}`,
+            title: `Server Gốc (Dự Phòng) - ${ep.name}`,
+            type: 'hls',
+            url: ep.link_m3u8
           });
         }
       }
